@@ -1,0 +1,63 @@
+services:
+  garage:
+    image: dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020
+    command: ["/garage", "server", "--single-node", "--default-bucket"]
+    env_file: .env
+    environment:
+      GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET}
+      GARAGE_ADMIN_TOKEN: ${GARAGE_ADMIN_TOKEN}
+      GARAGE_DEFAULT_ACCESS_KEY: ${GARAGE_DEFAULT_ACCESS_KEY}
+      GARAGE_DEFAULT_SECRET_KEY: ${GARAGE_DEFAULT_SECRET_KEY}
+      GARAGE_DEFAULT_BUCKET: ${GARAGE_DEFAULT_BUCKET}
+    ports:
+      - "3900:3900"
+      - "3902:3902"
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+    healthcheck:
+      test: ["CMD", "/garage", "status"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  garage-ui:
+    image: noooste/garage-ui:v0.13.0@sha256:a1444fa10585a0efc8ce3c33ebda873e5714d51dbc8f7f49d00143ff3b72fcc2
+    depends_on:
+      garage:
+        condition: service_healthy
+    environment:
+      GARAGE_UI_GARAGE_ENDPOINT: http://garage:3900
+      GARAGE_UI_GARAGE_ADMIN_ENDPOINT: http://garage:3903
+      GARAGE_UI_GARAGE_ADMIN_TOKEN: ${GARAGE_ADMIN_TOKEN}
+      GARAGE_UI_GARAGE_REGION: ${IRONHIDE_S3_REGION}
+      GARAGE_UI_AUTH_TOKEN_ENABLED: "true"
+      GARAGE_UI_SERVER_HOST: 0.0.0.0
+    ports:
+      - "8080:8080"
+
+    restart: unless-stopped
+
+  backend:
+    build: backend/
+    depends_on:
+      garage:
+        condition: service_healthy
+    environment:
+      # The names a Garage client reads are not the names Garage bootstraps
+      # with, so map one onto the other instead of duplicating the secrets.
+      GARAGE_ACCESS_KEY: ${GARAGE_DEFAULT_ACCESS_KEY}
+      GARAGE_SECRET_KEY: ${GARAGE_DEFAULT_SECRET_KEY}
+      GARAGE_ENDPOINT: http://garage:3900
+      GARAGE_REGION: garage
+      GARAGE_BUCKET: ${GARAGE_DEFAULT_BUCKET}
+      ADDR: :2345
+    ports:
+      - "2345:2345"
+    restart: unless-stopped
+
+volumes:
+  garage-meta:
+  garage-data:
