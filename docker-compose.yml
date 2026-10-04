@@ -45,19 +45,44 @@ services:
     depends_on:
       garage:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     environment:
-      # The names a Garage client reads are not the names Garage bootstraps
-      # with, so map one onto the other instead of duplicating the secrets.
       GARAGE_ACCESS_KEY: ${GARAGE_DEFAULT_ACCESS_KEY}
       GARAGE_SECRET_KEY: ${GARAGE_DEFAULT_SECRET_KEY}
       GARAGE_ENDPOINT: http://garage:3900
       GARAGE_REGION: garage
       GARAGE_BUCKET: ${GARAGE_DEFAULT_BUCKET}
       ADDR: :2345
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_SSLMODE: disable
     ports:
       - "2345:2345"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16
+    container_name: ironhide_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
     restart: unless-stopped
 
 volumes:
   garage-meta:
   garage-data:
+  postgres_data:

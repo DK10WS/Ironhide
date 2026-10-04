@@ -5,16 +5,25 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
 
 	"github.com/dk10ws/ironhide/internal/api"
 	"github.com/dk10ws/ironhide/internal/config"
+	"github.com/dk10ws/ironhide/internal/database"
 	"github.com/dk10ws/ironhide/internal/garage"
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 
-	if err := run(context.Background()); err != nil {
+	// Cancel on SIGTERM so in-flight requests finish and the pool closes
+	// cleanly. Without this a rolling deploy drops connections.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx); err != nil {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
 	}
@@ -26,7 +35,21 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	client, err := garage.New(ctx, cfg)
+	db, err := database.Open(ctx, cfg.Postgres)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			slog.Warn("close postgres", "err", err)
+		}
+	}()
+
+	if err := db.Migrate(); err != nil {
+		return err
+	}
+
+	s3Client, err := garage.New(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -35,7 +58,9 @@ func run(ctx context.Context) error {
 		"addr", cfg.Addr,
 		"endpoint", cfg.Endpoint,
 		"bucket", cfg.Bucket,
+		"postgres", cfg.Postgres.Host+":"+strconv.Itoa(cfg.Postgres.Port)+"/"+cfg.Postgres.Database,
 	)
 
-	return api.NewRouter(client, cfg.Bucket).Run(cfg.Addr)
+	router := api.NewRouter(s3Client, cfg.Bucket, db)
+	return router.Run(cfg.Addr)
 }
