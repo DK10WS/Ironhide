@@ -10,6 +10,9 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -18,8 +21,36 @@ import (
 	"github.com/dk10ws/ironhide/internal/safepath"
 )
 
+var (
+	ErrInvalidArchive = errors.New("invalid archive")
+
+	ErrTooManyEntries = errors.New("too many entries")
+
+	ErrTooLarge = errors.New("upload too large")
+
+	ErrNoIndexHTML = errors.New("upload contains no index.html")
+)
+
+const prefixSegmentBytes = 8
+
+func newPrefix() string {
+	var b [prefixSegmentBytes]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(fmt.Sprintf("upload: crypto/rand unavailable: %v", err))
+	}
+	return "uploads/" + hex.EncodeToString(b[:]) + "/"
+}
+
+// ObjectStore is the subset of object storage this package needs.
+//
+// It is an interface so the archive logic can be tested against an in-memory
+// fake. The production implementation lives in package garage.
 type ObjectStore interface {
-	PutObject(ctx context.Context, key string, body io.Reader, size int64, contentType string) (string, error)
+	// PutObject writes body at key and returns the stored ETag. size must be
+	// the exact number of bytes body will yield: the S3 client cannot stream
+	// an object of unknown length and would buffer it internally, which would
+	// defeat the memory bounds this package enforces.
+	PutObject(ctx context.Context, key string, body io.Reader, size int64) (string, error)
 }
 
 type Result struct {
@@ -111,7 +142,7 @@ func FromZip(ctx context.Context, store ObjectStore, r io.Reader, opts Options) 
 	}
 
 	for _, f := range files {
-		etag, err := store.PutObject(ctx, res.Prefix+f.rel, bytes.NewReader(f.data), int64(len(f.data)), f.contentType)
+		etag, err := store.PutObject(ctx, res.Prefix+f.rel, bytes.NewReader(f.data), int64(len(f.data)))
 		if err != nil {
 			return res, err
 		}
@@ -126,9 +157,8 @@ func FromZip(ctx context.Context, store ObjectStore, r io.Reader, opts Options) 
 }
 
 type planned struct {
-	rel         string
-	contentType string
-	data        []byte
+	rel  string
+	data []byte
 }
 
 func plan(zr *zip.Reader, opts Options) ([]planned, string, error) {
@@ -188,7 +218,7 @@ func plan(zr *zip.Reader, opts Options) ([]planned, string, error) {
 			return nil, "", fmt.Errorf("%w: extracted size exceeds %d bytes", ErrTooLarge, l.MaxTotalBytes)
 		}
 
-		files = append(files, planned{rel: rel, contentType: ContentTypeFor(rel), data: data})
+		files = append(files, planned{rel: rel, data: data})
 	}
 
 	return files, rootDir, nil
@@ -301,7 +331,7 @@ func FromSingleFile(ctx context.Context, store ObjectStore, name string, r io.Re
 	}
 
 	res := Result{Prefix: newPrefix()}
-	etag, err := store.PutObject(ctx, res.Prefix+rel, bytes.NewReader(data), int64(len(data)), ContentTypeFor(rel))
+	etag, err := store.PutObject(ctx, res.Prefix+rel, bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return res, err
 	}

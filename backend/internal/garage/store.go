@@ -27,7 +27,7 @@ func NewStore(ctx context.Context, c config.Config) (*Store, error) {
 	return &Store{s3: client, bucket: c.Bucket}, nil
 }
 
-func (s *Store) PutObject(ctx context.Context, key string, body io.Reader, size int64, contentType string) (string, error) {
+func (s *Store) PutObject(ctx context.Context, key string, body io.Reader, size int64) (string, error) {
 	if err := safepath.ValidateKey(key); err != nil {
 		return "", fmt.Errorf("reject key: %w", err)
 	}
@@ -40,9 +40,6 @@ func (s *Store) PutObject(ctx context.Context, key string, body io.Reader, size 
 		Key:           aws.String(key),
 		Body:          body,
 		ContentLength: aws.Int64(size),
-	}
-	if contentType != "" {
-		in.ContentType = aws.String(contentType)
 	}
 
 	out, err := s.s3.PutObject(ctx, in)

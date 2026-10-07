@@ -1,6 +1,7 @@
 package database
 
 import (
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -33,10 +34,10 @@ type Site struct {
 }
 
 type Deployment struct {
-	ID     uint `gorm:"primaryKey"`
-	SiteID uint `gorm:"index;not null"`
-	Site   Site `gorm:"foreignKey:SiteID;constraint:OnDelete:CASCADE"`
+	ID uint `gorm:"primaryKey"`
 
+	SiteID *uint  `gorm:"index"`
+	Site   *Site  `gorm:"foreignKey:SiteID;constraint:OnDelete:SET NULL"`
 	Prefix string `gorm:"size:128;index;not null"`
 
 	Status string `gorm:"size:16;index;not null;default:pending"`
@@ -44,7 +45,7 @@ type Deployment struct {
 	FileCount int   `gorm:"not null;default:0"`
 	Bytes     int64 `gorm:"not null;default:0"`
 
-	Manifest []byte `gorm:"type:jsonb"`
+	Manifest Manifest `gorm:"type:jsonb"`
 
 	ClaimTokenHash string `gorm:"size:64;index"`
 
@@ -64,8 +65,22 @@ func (d *Deployment) Claimed() bool {
 	return d.ClaimedAt != nil
 }
 
+// Anonymous reports whether the drop is unclaimed and unattached to a site.
+func (d *Deployment) Anonymous() bool {
+	return d.SiteID == nil && !d.Claimed()
+}
+
+// PublicURLPath is where this deployment's objects are served.
 func (d *Deployment) PublicURLPath() string {
-	return "/d/" + d.Prefix
+	return "/" + strings.Trim(d.Prefix, "/")
+}
+
+func (d *Deployment) Slug() string {
+	p := strings.Trim(d.Prefix, "/")
+	if i := strings.LastIndex(p, "/"); i >= 0 {
+		return p[i+1:]
+	}
+	return p
 }
 
 func (d *Deployment) BeforeCreate(tx *gorm.DB) error {
