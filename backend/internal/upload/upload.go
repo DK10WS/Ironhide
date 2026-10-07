@@ -93,7 +93,18 @@ func DefaultLimits() Limits {
 type Options struct {
 	Limits Limits
 
+	// FlattenRoot strips a single top-level directory, so zipping a project
+	// folder produces index.html at the root instead of
+	// mysite/index.html. Off by default because it is surprising: it also
+	// means every file moves when the folder is renamed.
 	FlattenRoot bool
+
+	// RequireIndexHTML rejects an upload that has no index.html at its root.
+	//
+	// The check runs during planning, before anything is written. Rejecting
+	// afterwards would leave objects in the bucket with no deployment row
+	// pointing at them, which nothing would ever find or clean up.
+	RequireIndexHTML bool
 }
 
 func DefaultOptions() Options {
@@ -115,7 +126,11 @@ func (o Options) normalized() Options {
 	if l.MaxEntries <= 0 {
 		l.MaxEntries = d.MaxEntries
 	}
-	return Options{Limits: l, FlattenRoot: o.FlattenRoot}
+	return Options{
+		Limits:           l,
+		FlattenRoot:      o.FlattenRoot,
+		RequireIndexHTML: o.RequireIndexHTML,
+	}
 }
 
 func FromZip(ctx context.Context, store ObjectStore, r io.Reader, opts Options) (Result, error) {
@@ -135,11 +150,22 @@ func FromZip(ctx context.Context, store ObjectStore, r io.Reader, opts Options) 
 	if err != nil {
 		return Result{}, err
 	}
+	return write(ctx, store, rootDir, files)
+}
 
+// write stores every planned file under one freshly generated prefix.
+//
+// The prefix is minted here, once, and never accepted from a caller. That is
+// the property that keeps one upload from addressing another: there is a
+// single code path where the prefix comes into existence, so no transport can
+// accidentally hand in its own.
+//
+// It is also why every file of a site lands under the same prefix. A static
+// site references its assets by relative URL, and a browser resolves those
+// against the page's own path, so app.js is only found if it shares a prefix
+// with the index.html that links it.
+func write(ctx context.Context, store ObjectStore, rootDir string, files []planned) (Result, error) {
 	res := Result{Prefix: newPrefix(), RootDir: rootDir}
-	if rootDir == "" {
-		res.Prefix = newPrefix()
-	}
 
 	for _, f := range files {
 		etag, err := store.PutObject(ctx, res.Prefix+f.rel, bytes.NewReader(f.data), int64(len(f.data)))
@@ -221,7 +247,69 @@ func plan(zr *zip.Reader, opts Options) ([]planned, string, error) {
 		files = append(files, planned{rel: rel, data: data})
 	}
 
+	if opts.RequireIndexHTML && !hasIndexHTML(files) {
+		return nil, "", missingIndexError(files, rootDir)
+	}
+
 	return files, rootDir, nil
+}
+
+// hasIndexHTML reports whether any planned file is an index at the prefix
+// root.
+//
+// The match is case-insensitive and accepts .htm, because a site built on a
+// case-insensitive filesystem will happily contain Index.HTML or index.htm and
+// a browser will serve them, so rejecting those would be a difference no user
+// could act on.
+func hasIndexHTML(files []planned) bool {
+	present, _ := findIndexHTML(files, "")
+	return present
+}
+
+// findIndexHTML locates an index file at the root. When rootDir is non-empty
+// it also reports whether one exists just inside that directory, which is the
+// difference between "you forgot the index" and "your archive has a wrapper
+// folder".
+func findIndexHTML(files []planned, rootDir string) (present bool, nested bool) {
+	prefix := strings.ToLower(rootDir + "/")
+	for _, f := range files {
+		name := strings.ToLower(f.rel)
+		if name == "index.html" || name == "index.htm" {
+			return true, nested
+		}
+		if rootDir != "" && strings.HasPrefix(name, prefix) {
+			switch strings.TrimPrefix(name, prefix) {
+			case "index.html", "index.htm":
+				nested = true
+			}
+		}
+	}
+	return false, nested
+}
+
+// missingIndexError explains why the root has no index, so the caller is not
+// left guessing which of the several ways this fails applies to them.
+func missingIndexError(files []planned, rootDir string) error {
+	if rootDir != "" {
+		if _, nested := findIndexHTML(files, rootDir); nested {
+			return fmt.Errorf(
+				"%w: every file is under %q/, so the index is not at the root; "+
+					"repost with ?flatten=true to strip that directory",
+				ErrNoIndexHTML, rootDir)
+		}
+	}
+
+	// No index anywhere. List a few names, since "there is no index" is much
+	// easier to act on when it says what was uploaded instead.
+	names := make([]string, 0, len(files))
+	for i, f := range files {
+		if i == 5 {
+			names = append(names, "...")
+			break
+		}
+		names = append(names, f.rel)
+	}
+	return fmt.Errorf("%w: found %s", ErrNoIndexHTML, strings.Join(names, ", "))
 }
 
 // readEntry extracts one entry with a hard byte cap.
@@ -302,42 +390,126 @@ func readCapped(r io.Reader, max int64) ([]byte, error) {
 	return buf, nil
 }
 
-// FromSingleFile stores one file under a fresh unique prefix.
+// IncomingFile is one file supplied by a caller, before validation.
+type IncomingFile struct {
+	// Name is the client-supplied filename. It is untrusted and is run
+	// through safepath.Relative before it becomes part of any key.
+	Name string
+
+	// Body is the content. It is read exactly once, with a cap. Ignored when
+	// Data is set.
+	Body io.Reader
+
+	// Data is content the caller has already buffered.
+	//
+	// It exists to avoid a second copy. An HTTP handler that reads multipart
+	// parts into memory already holds the bytes, and reading them again here
+	// doubled peak memory for every upload: a request inside every configured
+	// cap measured 531 MiB peak for 180 MiB accepted.
+	//
+	// The bytes are retained by the caller for the duration of the call, so
+	// FromFiles copies nothing and mutating them afterwards is the caller's
+	// problem.
+	Data []byte
+
+	// Size is the declared length, or -1 when unknown. When known it is
+	// checked against the bytes actually read, so a truncated stream cannot
+	// pass unnoticed.
+	Size int64
+}
+
+// FromFiles stores several files under a single fresh unique prefix.
 //
-// Unlike an archive, a single file has no internal name, so name is required.
-// It is validated exactly like a zip member: a client-supplied filename is
-// attacker-controlled and must not be able to address anything outside the new
-// prefix.
-func FromSingleFile(ctx context.Context, store ObjectStore, name string, r io.Reader, size int64, opts Options) (Result, error) {
+// This is the path a multi-file site takes. Every file shares one prefix
+// because that is what relative URLs inside the site require: a browser
+// resolves ./assets/app.js against the page URL, so it only finds the file if
+// app.js sits under the same prefix as the index.html that links it.
+//
+// Every file is validated and read before anything is written, so a bad name
+// or an oversized file cannot leave objects behind.
+func FromFiles(ctx context.Context, store ObjectStore, files []IncomingFile, opts Options) (Result, error) {
 	opts = opts.normalized()
 
-	rel, err := safepath.Relative(name)
+	planned, err := planFiles(files, opts)
 	if err != nil {
 		return Result{}, err
 	}
-	if rel == "" {
-		return Result{}, fmt.Errorf("%w: unusable filename", safepath.ErrUnsafe)
+	return write(ctx, store, "", planned)
+}
+
+// planFiles validates and reads every incoming file.
+//
+// The result preserves the order the files arrived in.
+func planFiles(files []IncomingFile, opts Options) ([]planned, error) {
+	l := opts.Limits
+	if len(files) == 0 {
+		return nil, fmt.Errorf("%w: no files supplied", ErrInvalidArchive)
+	}
+	if len(files) > l.MaxEntries {
+		return nil, fmt.Errorf("%w: %d files exceeds limit of %d", ErrTooManyEntries, len(files), l.MaxEntries)
 	}
 
-	data, err := io.ReadAll(io.LimitReader(r, opts.Limits.MaxFileBytes+1))
-	if err != nil {
-		return Result{}, fmt.Errorf("read upload: %w", err)
-	}
-	if int64(len(data)) > opts.Limits.MaxFileBytes {
-		return Result{}, fmt.Errorf("%w: file exceeds %d bytes", ErrTooLarge, opts.Limits.MaxFileBytes)
-	}
-	if size >= 0 && size != int64(len(data)) {
-		return Result{}, fmt.Errorf("%w: declared size %d does not match %d bytes read", ErrInvalidArchive, size, len(data))
+	out := make([]planned, 0, len(files))
+	seen := make(map[string]struct{}, len(files))
+	var total int64
+
+	for _, f := range files {
+		rel, err := safepath.Relative(f.Name)
+		if err != nil {
+			return nil, err
+		}
+		if rel == "" {
+			return nil, fmt.Errorf("%w: unusable filename %q", safepath.ErrUnsafe, f.Name)
+		}
+
+		// Two parts claiming the same key would race, and whichever landed
+		// last would silently win.
+		if _, dup := seen[rel]; dup {
+			return nil, fmt.Errorf("%w: duplicate filename %q", ErrInvalidArchive, rel)
+		}
+		seen[rel] = struct{}{}
+
+		var data []byte
+		if f.Data != nil {
+			if int64(len(f.Data)) > l.MaxFileBytes {
+				return nil, fmt.Errorf("%w: %q exceeds %d bytes", ErrTooLarge, rel, l.MaxFileBytes)
+			}
+			data = f.Data
+		} else {
+			var err error
+			data, err = io.ReadAll(io.LimitReader(f.Body, l.MaxFileBytes+1))
+			if err != nil {
+				return nil, fmt.Errorf("read %q: %w", rel, err)
+			}
+			if int64(len(data)) > l.MaxFileBytes {
+				return nil, fmt.Errorf("%w: %q exceeds %d bytes", ErrTooLarge, rel, l.MaxFileBytes)
+			}
+		}
+		if f.Size >= 0 && f.Size != int64(len(data)) {
+			return nil, fmt.Errorf("%w: %q declared %d bytes but delivered %d",
+				ErrInvalidArchive, rel, f.Size, len(data))
+		}
+
+		total += int64(len(data))
+		if total > l.MaxTotalBytes {
+			return nil, fmt.Errorf("%w: total size exceeds %d bytes", ErrTooLarge, l.MaxTotalBytes)
+		}
+
+		out = append(out, planned{rel: rel, data: data})
 	}
 
-	res := Result{Prefix: newPrefix()}
-	etag, err := store.PutObject(ctx, res.Prefix+rel, bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		return res, err
+	if opts.RequireIndexHTML && !hasIndexHTML(out) {
+		return nil, missingIndexError(out, "")
 	}
 
-	res.Files = []File{{Key: res.Prefix + rel, Size: int64(len(data)), ETag: etag}}
-	res.Bytes = int64(len(data))
-	res.HasIndexHTML = rel == "index.html"
-	return res, nil
+	return out, nil
+}
+
+// FromSingleFile stores one file under a fresh unique prefix.
+//
+// It is FromFiles with a single element, kept because "upload one file" is a
+// distinct thing a client can ask for and reads better at the call site than
+// building a one-element slice inline.
+func FromSingleFile(ctx context.Context, store ObjectStore, name string, r io.Reader, size int64, opts Options) (Result, error) {
+	return FromFiles(ctx, store, []IncomingFile{{Name: name, Body: r, Size: size}}, opts)
 }

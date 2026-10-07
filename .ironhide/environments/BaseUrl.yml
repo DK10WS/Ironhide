@@ -1,0 +1,4 @@
+name: BaseUrl
+variables:
+  - name: BaseUrl
+    value: http://localhost:2345

@@ -49,7 +49,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	s3Client, err := garage.New(ctx, cfg)
+	store, err := garage.NewStore(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -61,6 +61,6 @@ func run(ctx context.Context) error {
 		"postgres", cfg.Postgres.Host+":"+strconv.Itoa(cfg.Postgres.Port)+"/"+cfg.Postgres.Database,
 	)
 
-	router := api.NewRouter(s3Client, cfg.Bucket, db)
+	router := api.NewRouter(cfg, store, db)
 	return router.Run(cfg.Addr)
 }
