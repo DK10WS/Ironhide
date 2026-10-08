@@ -2,6 +2,7 @@ package test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"sync"
@@ -77,7 +78,7 @@ func TestCreateDeploymentFillsEveryColumn(t *testing.T) {
 	if d.FileCount != 2 || d.Bytes != 27 {
 		t.Errorf("FileCount = %d, Bytes = %d, want 2 and 27", d.FileCount, d.Bytes)
 	}
-	if d.ExpiresAt.IsZero() {
+	if d.ExpiresAt == nil {
 		t.Error("ExpiresAt must be set for a claimable drop")
 	}
 	if d.Claimed() || !d.Anonymous() {
@@ -129,8 +130,8 @@ func TestOwnedDeploymentNeverExpires(t *testing.T) {
 	if !d.Claimed() {
 		t.Error("an owned deployment is claimed immediately")
 	}
-	if !d.ExpiresAt.IsZero() {
-		t.Error("an owned deployment must not expire")
+	if d.ExpiresAt != nil {
+		t.Error("an owned deployment must have no expiry, stored as NULL")
 	}
 	if d.Expired(time.Now()) {
 		t.Error("a zero ExpiresAt must never read as expired")
@@ -364,5 +365,78 @@ func TestGetDeploymentByPrefixNotFound(t *testing.T) {
 	_, err := db.GetDeploymentByPrefix(context.Background(), "uploads/does-not-exist-xyz")
 	if err != database.ErrNotFound {
 		t.Errorf("want ErrNotFound, got %v", err)
+	}
+}
+
+// TestCreateRejectsNegativeTTL pins a real defect: a negative TTL used to fall
+// through the "TTL > 0" branch, leaving ExpiresAt zero, which reads as never
+// expiring. The caller got a permanent deployment instead of an error, and
+// nothing would ever have swept it.
+func TestCreateRejectsNegativeTTL(t *testing.T) {
+	db := liveDB(t)
+
+	cases := map[string]database.CreateDeploymentInput{
+		"anonymous drop": {
+			Prefix: uniquePrefix(t),
+			Files:  manifest(),
+			TTL:    -time.Minute,
+		},
+		// The owned path short-circuits the TTL branch entirely, so this case
+		// is checked separately: it must not be a way to smuggle a bad TTL past
+		// validation either.
+		"owned deployment": {
+			Prefix:    uniquePrefix(t),
+			Files:     manifest(),
+			ClaimedBy: "user-1",
+			TTL:       -time.Hour,
+		},
+	}
+
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			res, err := db.CreateDeployment(context.Background(), in)
+			if err == nil {
+				// If it was accepted, it is a permanent row: remove it.
+				t.Cleanup(func() {
+					db.DB().Exec("DELETE FROM deployments WHERE id = ?", res.Deployment.ID)
+				})
+				t.Fatalf("a negative TTL was accepted and produced a deployment "+
+					"with ExpiresAt %v (nil means permanent)", res.Deployment.ExpiresAt)
+			}
+			if !errors.Is(err, database.ErrInvalidTTL) {
+				t.Errorf("want ErrInvalidTTL, got %v", err)
+			}
+		})
+	}
+}
+
+// TestZeroTTLMakesADropPermanent documents the other half: zero is a valid
+// request meaning "no expiry", not an error.
+func TestZeroTTLMakesADropPermanent(t *testing.T) {
+	db := liveDB(t)
+
+	res := mustCreate(t, db, database.CreateDeploymentInput{
+		Prefix: uniquePrefix(t),
+		Files:  manifest(),
+		TTL:    0,
+	})
+
+	if res.Deployment.ExpiresAt != nil {
+		t.Errorf("ExpiresAt = %v, want NULL for a permanent deployment",
+			res.Deployment.ExpiresAt)
+	}
+	if res.Deployment.Expired(time.Now()) {
+		t.Error("a deployment with no expiry must never read as expired")
+	}
+
+	// And it must not appear in the sweeper's work list.
+	expired, err := db.ListExpired(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("ListExpired: %v", err)
+	}
+	for _, d := range expired {
+		if d.ID == res.Deployment.ID {
+			t.Error("a deployment with no expiry must never be swept")
+		}
 	}
 }

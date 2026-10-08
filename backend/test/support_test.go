@@ -185,6 +185,15 @@ func mustCreate(t *testing.T, db *database.Database, in database.CreateDeploymen
 	return res
 }
 
+// createOwned builds the input for an already-owned deployment.
+func createOwned(prefix string) database.CreateDeploymentInput {
+	return database.CreateDeploymentInput{
+		Prefix:    prefix,
+		Files:     manifest(),
+		ClaimedBy: "user-permanent",
+	}
+}
+
 // mustSite upserts a site and guarantees its removal.
 func mustSite(t *testing.T, db *database.Database, slug, domain, owner string) *database.Site {
 	t.Helper()

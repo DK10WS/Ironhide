@@ -261,10 +261,20 @@ func (h *Handler) respondCreated(c *gin.Context, res upload.Result) {
 		"id":          d.ID,
 		"preview_url": h.previewURL(d.Slug()),
 		"claim_url":   h.claimURL(created.ClaimToken),
-		"expires_at":  d.ExpiresAt.Format(time.RFC3339),
+		"expires_at":  expiresAt(d),
 		"bytes":       res.Bytes,
 		"files":       res.Files,
 	})
+}
+
+// expiresAt renders the claim deadline, or null when the deployment is
+// permanent. A permanent drop has no deadline to report, and emitting the zero
+// time would be a lie.
+func expiresAt(d *database.Deployment) any {
+	if d.ExpiresAt == nil {
+		return nil
+	}
+	return d.ExpiresAt.Format(time.RFC3339)
 }
 
 // claimURL builds the single-use claim link for a drop.

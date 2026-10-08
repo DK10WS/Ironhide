@@ -27,6 +27,9 @@ var (
 
 	// ErrInvalidPrefix means a prefix was empty or malformed.
 	ErrInvalidPrefix = errors.New("invalid prefix")
+
+	// ErrInvalidTTL means the claim window was negative.
+	ErrInvalidTTL = errors.New("invalid ttl")
 )
 
 // CreateDeploymentInput is everything needed to record one upload.
@@ -88,6 +91,19 @@ func (d *Database) CreateDeployment(ctx context.Context, in CreateDeploymentInpu
 		return nil, ErrInvalidPrefix
 	}
 
+	// A negative TTL is rejected rather than absorbed. It previously fell
+	// through the "TTL > 0" branch below, leaving ExpiresAt zero, and a zero
+	// ExpiresAt reads as never expiring — so a caller passing -1 got a
+	// permanent deployment instead of an error. That is the worst possible
+	// failure for the sweeper: a site nothing will ever clean up, created by
+	// what looks like a harmless mistake.
+	//
+	// Zero is still meaningful and means "no expiry", which is what a
+	// deployment attached to a site wants.
+	if in.TTL < 0 {
+		return nil, fmt.Errorf("%w: must not be negative, got %s", ErrInvalidTTL, in.TTL)
+	}
+
 	token, err := NewClaimToken()
 	if err != nil {
 		return nil, fmt.Errorf("generate claim token: %w", err)
@@ -107,14 +123,15 @@ func (d *Database) CreateDeployment(ctx context.Context, in CreateDeploymentInpu
 	}
 
 	// An owned deployment is not a drop: it has no claim window, because there
-	// is nothing to claim. Leaving ExpiresAt zero makes Expired() false
-	// forever, which is what the sweeper checks.
+	// is nothing to claim. A nil ExpiresAt is stored as NULL, which no
+	// expiry comparison can match.
 	if in.ClaimedBy != "" {
 		dep.ClaimedAt = &now
 		dep.ClaimedBy = in.ClaimedBy
 		dep.ClaimTokenHash = ""
 	} else if in.TTL > 0 {
-		dep.ExpiresAt = now.Add(in.TTL)
+		expires := now.Add(in.TTL)
+		dep.ExpiresAt = &expires
 	}
 
 	if err := d.db.WithContext(ctx).Create(dep).Error; err != nil {
@@ -226,7 +243,9 @@ func (d *Database) ListExpired(ctx context.Context, limit int) ([]Deployment, er
 
 	var out []Deployment
 	err := d.db.WithContext(ctx).
-		Where("claimed_at IS NULL AND expires_at <= ?", time.Now().UTC()).
+		// expires_at IS NOT NULL is explicit even though the comparison
+		// already excludes NULL, so the intent survives a future rewrite.
+		Where("claimed_at IS NULL AND expires_at IS NOT NULL AND expires_at <= ?", time.Now().UTC()).
 		Order("expires_at ASC").
 		Limit(limit).
 		Find(&out).Error

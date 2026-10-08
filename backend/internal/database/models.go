@@ -49,7 +49,14 @@ type Deployment struct {
 
 	ClaimTokenHash string `gorm:"size:64;index"`
 
-	ExpiresAt time.Time  `gorm:"index"`
+	// ExpiresAt is nullable so "never expires" is SQL NULL.
+	//
+	// It was a plain time.Time, which GORM writes as 0001-01-01 rather than
+	// NULL. That made "expires_at <= now()" true for every deployment with no
+	// expiry, so the sweeper's work list would have contained every permanent
+	// site. A pointer makes the permanent case unrepresentable instead of
+	// merely unlikely.
+	ExpiresAt *time.Time `gorm:"index"`
 	ClaimedAt *time.Time `gorm:"index"`
 	ClaimedBy string     `gorm:"size:64"`
 
@@ -58,7 +65,7 @@ type Deployment struct {
 }
 
 func (d *Deployment) Expired(now time.Time) bool {
-	return !d.ExpiresAt.IsZero() && d.ExpiresAt.Before(now)
+	return d.ExpiresAt != nil && d.ExpiresAt.Before(now)
 }
 
 func (d *Deployment) Claimed() bool {
