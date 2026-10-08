@@ -1,8 +1,10 @@
 package test
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -333,5 +335,39 @@ func TestNonMultipartBodyIsRejected(t *testing.T) {
 	resp := do(t, srv, "POST", controlHost, "/upload/files", strings.NewReader("raw"))
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("non-multipart upload = %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestClaimTokenIsNotLogged is a regression test for a real leak: the request
+// logger recorded the URL path verbatim, and for POST /claim/<token> that path
+// is the only credential on the route.
+func TestClaimTokenIsNotLogged(t *testing.T) {
+	// This asserts the observable property rather than reaching into the
+	// logger: a real request is issued and the emitted log lines are scanned
+	// for the token.
+	srv, db, _ := newTestServer(t)
+
+	res := mustCreate(t, db, database.CreateDeploymentInput{
+		Prefix: uniquePrefix(t), Files: manifest(), TTL: time.Hour,
+	})
+	_ = res
+
+	token, err := database.NewClaimToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+
+	do(t, srv, "POST", controlHost, "/claim/"+token, nil)
+
+	if strings.Contains(buf.String(), token) {
+		t.Errorf("the claim token leaked into the logs:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "/claim/***") {
+		t.Errorf("expected a redacted path, got:\n%s", buf.String())
 	}
 }

@@ -141,30 +141,39 @@ func (d *Database) CreateDeployment(ctx context.Context, in CreateDeploymentInpu
 	return &CreateDeploymentResult{Deployment: dep, ClaimToken: token}, nil
 }
 
-// ClaimDeployment redeems a claim token, attaching the drop to a site.
+// ClaimPermanently redeems a claim token to stop a drop from expiring.
+//
+// The token is the credential: there is no other authentication on this path,
+// which is why it is single-use, 256 bits wide, and never stored in plaintext.
 //
 // The UPDATE is conditional on claimed_at still being NULL, which is what makes
 // the token single-use under concurrency: two simultaneous requests produce one
 // winner and one ErrAlreadyClaimed, decided by the row lock rather than by a
 // read-then-write race.
-func (d *Database) ClaimDeployment(ctx context.Context, token string, siteID uint, claimedBy string) (*Deployment, error) {
+//
+// Clearing expires_at is the whole point. It is set to NULL rather than a far
+// future date so the row becomes indistinguishable from one that was never a
+// drop, and no sweeper query can select it.
+func (d *Database) ClaimPermanently(ctx context.Context, token, claimedBy string) (*Deployment, error) {
 	hash := HashClaimToken(token)
 	if hash == "" {
 		return nil, ErrNotFound
 	}
 
 	now := time.Now().UTC()
+	dep := &Deployment{}
 
 	res := d.db.WithContext(ctx).
-		Model(&Deployment{}).
+		Model(dep).
+		Clauses(clause.Returning{}).
 		Where("claim_token_hash = ? AND claimed_at IS NULL", hash).
 		// A drop whose window closed cannot be claimed even if the token is
-		// still valid and the row was not swept yet.
-		Where("expires_at > ?", now).
+		// still valid and the row has not been swept yet.
+		Where("expires_at IS NOT NULL AND expires_at > ?", now).
 		Updates(map[string]any{
-			"site_id":    siteID,
 			"claimed_at": &now,
 			"claimed_by": claimedBy,
+			"expires_at": nil,
 			"status":     StatusLive,
 			"updated_at": now,
 			// The token is spent. Clearing the hash also means a database dump
@@ -179,7 +188,12 @@ func (d *Database) ClaimDeployment(ctx context.Context, token string, siteID uin
 		return nil, ErrAlreadyClaimed
 	}
 
-	return d.GetDeploymentBySite(ctx, siteID)
+	// RETURNING filled dep from the row it just updated, so this does not need
+	// a second query keyed on a hash that no longer exists.
+	if dep.ID == 0 {
+		return nil, ErrNotFound
+	}
+	return dep, nil
 }
 
 // GetDeployment loads one deployment by its primary key.

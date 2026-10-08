@@ -13,6 +13,8 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -118,25 +120,54 @@ func (h *Handler) ready(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ready"})
 }
 
-// claim redeems a single-use claim token, attaching a drop to a site.
+// claim redeems a claim token, making an anonymous drop permanent.
+//
+// The token in the URL is the entire credential. There is no session, no API
+// key and no second factor, which is a deliberate simplification: the token is
+// 256 bits of CSPRNG output, single-use, and only its hash is stored. The cost
+// is that a leaked claim_url can be redeemed by whoever holds it, and that
+// there is no way to revoke one early.
+//
+// Nothing about the token is logged. It is the only credential on this path,
+// and stderr is shipped onward to a collector.
 func (h *Handler) claim(c *gin.Context) {
 	token := c.Param("token")
 	if token == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing token"})
+		h.fail(c, fmt.Errorf("%w: missing claim token", database.ErrNotFound))
 		return
 	}
 
-	// A claim without a site to attach to has nowhere to go yet, so the
-	// endpoint reports what it needs rather than pretending to succeed.
-	c.JSON(http.StatusNotImplemented, gin.H{
-		"error": "claiming needs a target site, which is not wired up yet",
-	})
+	dep, err := h.db.ClaimPermanently(c.Request.Context(), token, claimedByToken)
+	if err != nil {
+		switch {
+		case errors.Is(err, database.ErrAlreadyClaimed):
+			// Ambiguous on purpose: a spent token and one that never existed
+			// are indistinguishable, so a caller cannot use the response to
+			// discover which tokens are outstanding.
+			c.JSON(http.StatusGone, gin.H{
+				"error": "this claim link has already been used or has expired",
+			})
+		case errors.Is(err, database.ErrNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "no such claim link"})
+		default:
+			h.fail(c, err)
+		}
+		return
+	}
 
-	// The token is deliberately absent from this log line. It is the only
-	// credential for an unclaimed drop, and stderr is shipped to a collector;
-	// even a prefix would cut a 256-bit secret's entropy for no benefit.
-	slog.Info("claim attempted")
+	slog.Info("deployment claimed", "id", dep.ID, "prefix", dep.Prefix)
+
+	c.JSON(http.StatusOK, gin.H{
+		"id":         dep.ID,
+		"site_url":   h.previewURL(dep.Slug()),
+		"claimed_at": dep.ClaimedAt.UTC().Format(time.RFC3339),
+	})
 }
+
+// claimedByToken records who claimed a deployment when the token is the only
+// credential available. It is a fixed string rather than the token itself, so
+// no secret reaches the database or the logs.
+const claimedByToken = "claim-token"
 
 func requestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -145,9 +176,32 @@ func requestLogger() gin.HandlerFunc {
 		slog.Info("request",
 			"method", c.Request.Method,
 			"host", c.Request.Host,
-			"path", c.Request.URL.Path,
+			"path", redactPath(c.Request.URL.Path),
 			"status", c.Writer.Status(),
 			"dur_ms", time.Since(start).Milliseconds(),
 		)
 	}
+}
+
+// redactPath strips credentials out of a path before it is logged.
+//
+// The claim token arrives as a path segment, so logging the path verbatim
+// writes the only credential on that route into stderr, which is shipped
+// onward to a collector. Gin's own recovery log can include the path too, so
+// this is not the only place the value could escape.
+func redactPath(p string) string {
+	const prefix = "/claim/"
+	if !strings.HasPrefix(p, prefix) {
+		return p
+	}
+	token := strings.TrimPrefix(p, prefix)
+	if token == "" {
+		return p
+	}
+	// Enough to correlate two attempts at the same link, not enough to use it.
+	const keep = 8
+	if len(token) <= keep {
+		return prefix + "***"
+	}
+	return prefix + "***" + token[len(token)-keep:]
 }

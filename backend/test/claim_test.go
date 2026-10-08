@@ -168,10 +168,6 @@ func TestClaimIsSingleUse(t *testing.T) {
 
 	const racers = 16
 
-	site := mustSite(t, db,
-		"race-"+database.HashClaimToken(t.Name())[:10],
-		"race-"+t.Name()+".example", "")
-
 	created := mustCreate(t, db, database.CreateDeploymentInput{
 		Prefix: uniquePrefix(t),
 		Files:  manifest(),
@@ -180,6 +176,7 @@ func TestClaimIsSingleUse(t *testing.T) {
 
 	var (
 		mu      sync.Mutex
+		winner  *database.Deployment
 		winners int
 		losers  int
 		start   = make(chan struct{})
@@ -192,12 +189,13 @@ func TestClaimIsSingleUse(t *testing.T) {
 			defer wg.Done()
 			<-start
 
-			_, err := db.ClaimDeployment(ctx, created.ClaimToken, site.ID, "racer")
+			claimed, err := db.ClaimPermanently(ctx, created.ClaimToken, "racer")
 			mu.Lock()
 			defer mu.Unlock()
 			switch err {
 			case nil:
 				winners++
+				winner = claimed
 			case database.ErrAlreadyClaimed:
 				losers++
 			default:
@@ -216,7 +214,25 @@ func TestClaimIsSingleUse(t *testing.T) {
 		t.Errorf("expected %d losers, got %d", racers-1, losers)
 	}
 
-	// The spent hash is cleared, so a later database dump cannot claim it.
+	// The claimed row comes back from RETURNING, so the caller does not need
+	// the spent hash to find it again.
+	if winner == nil {
+		t.Fatal("no deployment was returned by the winning claim")
+	}
+	claimed := winner
+	if claimed.ID == 0 {
+		t.Error("ClaimPermanently must return the claimed deployment")
+	}
+	if !claimed.Claimed() {
+		t.Error("the returned deployment should be claimed")
+	}
+	if claimed.ExpiresAt != nil {
+		t.Error("a claimed deployment must have no expiry, stored as NULL")
+	}
+	if claimed.Expired(time.Now()) {
+		t.Error("a claimed deployment must never read as expired")
+	}
+
 	reloaded, err := db.GetDeployment(ctx, created.Deployment.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -224,8 +240,8 @@ func TestClaimIsSingleUse(t *testing.T) {
 	if reloaded.ClaimTokenHash != "" {
 		t.Error("a spent token hash must be cleared")
 	}
-	if !reloaded.Claimed() {
-		t.Error("the deployment should be claimed exactly once")
+	if reloaded.ExpiresAt != nil {
+		t.Error("claiming must clear expires_at to NULL")
 	}
 }
 
@@ -242,7 +258,6 @@ func TestClaimRejectsWrongToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	cleanupDeployments(t, db, created.Deployment.Prefix)
-	site := mustSite(t, db, "wt-"+t.Name(), "wt-"+t.Name()+".example", "")
 
 	// An empty token is rejected earlier than a well-formed wrong one, so it
 	// reports ErrNotFound rather than ErrAlreadyClaimed. Both refuse, and
@@ -255,7 +270,7 @@ func TestClaimRejectsWrongToken(t *testing.T) {
 		created.ClaimToken[:len(created.ClaimToken)-1]: database.ErrAlreadyClaimed,
 	}
 	for token, want := range tokens {
-		_, err := db.ClaimDeployment(ctx, token, site.ID, "u")
+		_, err := db.ClaimPermanently(ctx, token, "u")
 		if err != want {
 			t.Errorf("token %q: want %v, got %v", token, want, err)
 		}
@@ -279,9 +294,7 @@ func TestClaimRefusesExpiredDrop(t *testing.T) {
 	cleanupDeployments(t, db, created.Deployment.Prefix)
 	expireNow(t, db, created.Deployment.Prefix)
 
-	site := mustSite(t, db, "st-"+t.Name(), "st-"+t.Name()+".example", "")
-
-	if _, err := db.ClaimDeployment(ctx, created.ClaimToken, site.ID, "u"); err != database.ErrAlreadyClaimed {
+	if _, err := db.ClaimPermanently(ctx, created.ClaimToken, "u"); err != database.ErrAlreadyClaimed {
 		t.Errorf("an expired drop must not be claimable, got %v", err)
 	}
 }
@@ -438,5 +451,62 @@ func TestZeroTTLMakesADropPermanent(t *testing.T) {
 		if d.ID == res.Deployment.ID {
 			t.Error("a deployment with no expiry must never be swept")
 		}
+	}
+}
+
+// TestClaimPermanentlyClearsExpiry is the property the sweeper depends on:
+// claiming must turn a drop into a permanent deployment that no expiry query
+// can select.
+func TestClaimPermanentlyClearsExpiry(t *testing.T) {
+	db := liveDB(t)
+	ctx := context.Background()
+
+	created := mustCreate(t, db, database.CreateDeploymentInput{
+		Prefix: uniquePrefix(t), Files: manifest(), TTL: time.Hour,
+	})
+	if created.Deployment.ExpiresAt == nil {
+		t.Fatal("precondition: a drop must have an expiry")
+	}
+
+	claimed, err := db.ClaimPermanently(ctx, created.ClaimToken, "claim-token")
+	if err != nil {
+		t.Fatalf("ClaimPermanently: %v", err)
+	}
+	if claimed.ExpiresAt != nil {
+		t.Errorf("ExpiresAt = %v, want NULL after claiming", claimed.ExpiresAt)
+	}
+	if !claimed.Claimed() {
+		t.Error("the deployment must report as claimed")
+	}
+	if claimed.Expired(time.Now()) {
+		t.Error("a claimed deployment must never read as expired")
+	}
+
+	// And it must not appear in the sweeper's work list.
+	expired, err := db.ListExpired(ctx, 100)
+	if err != nil {
+		t.Fatalf("ListExpired: %v", err)
+	}
+	for _, d := range expired {
+		if d.ID == claimed.ID {
+			t.Error("a claimed deployment must never be swept")
+		}
+	}
+}
+
+// TestClaimRefusesAnAlreadyPermanentDeployment: a deployment with no expiry was
+// never a drop, so there is nothing to claim and no token to redeem.
+func TestClaimRefusesAnAlreadyPermanentDeployment(t *testing.T) {
+	db := liveDB(t)
+	ctx := context.Background()
+
+	owned := mustCreate(t, db, createOwned(uniquePrefix(t)))
+
+	// The owned row has no token hash at all, so any token must fail.
+	if _, err := db.ClaimPermanently(ctx, "any-token-at-all", "u"); err != database.ErrAlreadyClaimed {
+		t.Errorf("want ErrAlreadyClaimed, got %v", err)
+	}
+	if owned.Deployment.ClaimTokenHash != "" {
+		t.Error("an owned deployment should have no token hash")
 	}
 }
