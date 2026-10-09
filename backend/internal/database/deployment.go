@@ -13,6 +13,8 @@ import (
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+
+	"github.com/dk10ws/ironhide/internal/upload"
 )
 
 // Errors returned by this file. Callers map these onto transport responses.
@@ -30,6 +32,10 @@ var (
 
 	// ErrInvalidTTL means the claim window was negative.
 	ErrInvalidTTL = errors.New("invalid ttl")
+
+	// ErrInvalidTransition means a state change was requested from a state
+	// the deployment is not in, which means something else already moved it.
+	ErrInvalidTransition = errors.New("invalid state transition")
 )
 
 // CreateDeploymentInput is everything needed to record one upload.
@@ -110,10 +116,20 @@ func (d *Database) CreateDeployment(ctx context.Context, in CreateDeploymentInpu
 	}
 
 	now := time.Now().UTC()
+
+	// An owned deployment has no upload phase: its objects already exist and
+	// there is nothing to claim, so it is born live. Creating it pending would
+	// leave it looking like an upload that never finished, which is exactly
+	// what the reconciler exists to abandon.
+	status := StatusPending
+	if in.ClaimedBy != "" {
+		status = StatusLive
+	}
+
 	dep := &Deployment{
 		SiteID:         in.SiteID,
 		Prefix:         prefix,
-		Status:         StatusLive,
+		Status:         status,
 		FileCount:      len(in.Files),
 		Bytes:          manifestTotal(in.Files),
 		Manifest:       Manifest(in.Files),
@@ -139,6 +155,235 @@ func (d *Database) CreateDeployment(ctx context.Context, in CreateDeploymentInpu
 	}
 
 	return &CreateDeploymentResult{Deployment: dep, ClaimToken: token}, nil
+}
+
+// RecordUpload attaches the manifest to a pending deployment and promotes it
+// to live in one statement.
+//
+// Doing both together means a deployment is never live with an empty
+// manifest, which would make the serve path unable to find its index.
+func (d *Database) RecordUpload(ctx context.Context, id uint, res upload.Result) error {
+	entries := make([]ManifestEntry, 0, len(res.Files))
+	for _, f := range res.Files {
+		entries = append(entries, ManifestEntry{Key: f.Key, Size: f.Size, ETag: f.ETag})
+	}
+
+	res1 := d.db.WithContext(ctx).
+		Model(&Deployment{}).
+		Where("id = ? AND status = ?", id, StatusPending).
+		Updates(map[string]any{
+			"status":     StatusLive,
+			"manifest":   Manifest(entries),
+			"file_count": len(entries),
+			"bytes":      res.Bytes,
+			"updated_at": time.Now().UTC(),
+		})
+	if res1.Error != nil {
+		return fmt.Errorf("record upload: %w", res1.Error)
+	}
+	if res1.RowsAffected == 0 {
+		return fmt.Errorf("%w: deployment %d is not pending", ErrInvalidTransition, id)
+	}
+	return nil
+}
+
+// MarkLive promotes a pending deployment to live.
+//
+// It is conditional on the row still being pending, so a reconciler that
+// already failed a stuck upload cannot have it promoted afterwards.
+func (d *Database) MarkLive(ctx context.Context, id uint) error {
+	return d.transition(ctx, id, StatusPending, StatusLive, nil)
+}
+
+// MarkFailed abandons a deployment whose objects never arrived, or that a
+// reconciler found stuck.
+//
+// The row is kept rather than deleted so the prefix stays visible for
+// diagnosis, and so the same prefix cannot be re-registered by a later
+// request.
+func (d *Database) MarkFailed(ctx context.Context, id uint) error {
+	now := time.Now().UTC()
+	return d.transition(ctx, id, StatusPending, StatusFailed, map[string]any{"updated_at": now})
+}
+
+// transition moves a deployment between states, only from the expected one.
+func (d *Database) transition(ctx context.Context, id uint, from, to string, extra map[string]any) error {
+	cols := map[string]any{"status": to}
+	for k, v := range extra {
+		cols[k] = v
+	}
+
+	res := d.db.WithContext(ctx).
+		Model(&Deployment{}).
+		Where("id = ? AND status = ?", id, from).
+		Updates(cols)
+	if res.Error != nil {
+		return fmt.Errorf("transition to %s: %w", to, res.Error)
+	}
+	if res.RowsAffected == 0 {
+		// Already moved on, or gone. Not an error: a reconciler and a handler
+		// racing over the same row is normal, and the outcome is correct
+		// either way.
+		return nil
+	}
+	return nil
+}
+
+// DeleteDeployment removes a row outright.
+//
+// It is used when an upload is rejected before writing anything: the row's
+// purpose is to describe objects, and with no objects there is nothing to
+// describe. Keeping a failed row for every bad request would let an
+// unauthenticated caller fill the table for free.
+func (d *Database) DeleteDeployment(ctx context.Context, id uint) error {
+	if err := d.db.WithContext(ctx).Delete(&Deployment{}, id).Error; err != nil {
+		return fmt.Errorf("delete deployment: %w", err)
+	}
+	return nil
+}
+
+// MarkStalePendingFailed abandons pending deployments older than grace.
+//
+// This is the reconciler. It works on rows rather than on objects precisely
+// because a stuck upload leaves a row behind: scanning the bucket for objects
+// with no row would mean listing every key, whereas this is one indexed query.
+//
+// grace must exceed the longest plausible upload, or a slow one gets abandoned
+// while it is still being written.
+func (d *Database) MarkStalePendingFailed(ctx context.Context, grace time.Duration, limit int) ([]Deployment, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+
+	cutoff := time.Now().UTC().Add(-grace)
+
+	// Claim the batch before changing it. SKIP LOCKED keeps two reconcilers
+	// from doing the same work: the second one takes the rows the first has
+	// locked rather than blocking behind them.
+	var stale []Deployment
+	err := d.db.WithContext(ctx).
+		Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+		Where("status = ? AND created_at < ?", StatusPending, cutoff).
+		// claimed_at IS NULL is belt and braces alongside the status check.
+		// Anything somebody owns is off limits to this query whatever else is
+		// true about the row, so no future change to the status handling can
+		// make it delete a real site.
+		Where("claimed_at IS NULL").
+		Order("created_at ASC").
+		Limit(limit).
+		Find(&stale).Error
+	if err != nil {
+		return nil, fmt.Errorf("find stale pending: %w", err)
+	}
+	if len(stale) == 0 {
+		return nil, nil
+	}
+
+	ids := make([]uint, 0, len(stale))
+	for i := range stale {
+		ids = append(ids, stale[i].ID)
+	}
+
+	res := d.db.WithContext(ctx).
+		Model(&Deployment{}).
+		Where("id IN ? AND status = ? AND claimed_at IS NULL", ids, StatusPending).
+		Updates(map[string]any{"status": StatusFailed, "updated_at": time.Now().UTC()})
+	if res.Error != nil {
+		return nil, fmt.Errorf("mark stale pending failed: %w", res.Error)
+	}
+
+	return stale, nil
+}
+
+// ListStaleFailed returns failed deployments old enough to be destroyed.
+//
+// The second stage of removal. A row reaches it only after the reconciler has
+// already decided the upload did not complete, and only once it has sat there
+// past grace, which is what separates "stopped trusting this" from "destroyed
+// it".
+func (d *Database) ListStaleFailed(ctx context.Context, grace time.Duration, limit int) ([]Deployment, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+
+	cutoff := time.Now().UTC().Add(-grace)
+
+	var out []Deployment
+	err := d.db.WithContext(ctx).
+		Where("status = ? AND claimed_at IS NULL AND updated_at < ?", StatusFailed, cutoff).
+		Order("updated_at ASC").
+		Limit(limit).
+		Find(&out).Error
+	if err != nil {
+		return nil, fmt.Errorf("list stale failed: %w", err)
+	}
+	return out, nil
+}
+
+// ClaimForPurge marks a deployment as being purged and reports whether this
+// caller won.
+//
+// from is the status the row must still be in. Callers differ because they
+// arrive at purging from different states: the purger from failed, the
+// sweeper from an expired live drop. Making it explicit stops a sweeper from
+// claiming a row the purger has already handled, or either from claiming a
+// pending upload.
+//
+// The state moves to a distinct value rather than being deleted straight away,
+// so the row stays visible and the delete can be retried if it fails partway.
+func (d *Database) ClaimForPurge(ctx context.Context, id uint, from string) (*Deployment, bool, error) {
+	var dep Deployment
+
+	res := d.db.WithContext(ctx).
+		Model(&Deployment{}).
+		Clauses(clause.Returning{}).
+		Where("id = ? AND status = ? AND claimed_at IS NULL", id, from).
+		Updates(map[string]any{"status": StatusPurging, "updated_at": time.Now().UTC()})
+	if res.Error != nil {
+		return nil, false, fmt.Errorf("claim for purge: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return nil, false, nil
+	}
+
+	err := d.db.WithContext(ctx).First(&dep, id).Error
+	if err != nil {
+		return nil, false, fmt.Errorf("load claimed deployment: %w", err)
+	}
+	return &dep, true, nil
+}
+
+// ListExpiredForSweep returns unclaimed drops whose claim window has closed.
+//
+// This is the expiry path's work list. Three exclusions matter:
+//
+//   - claimed_at IS NULL: anything somebody owns is permanent and must never
+//     appear here, whatever its status says.
+//   - expires_at IS NOT NULL: "no expiry" is stored as NULL, and a comparison
+//     would never match it anyway. Spelled out so the intent survives a
+//     rewrite of this query.
+//   - status is live or already purging. Pending is excluded deliberately:
+//     CreateDeployment sets an expiry before the upload starts, so keying on
+//     expiry alone would let a slow upload be destroyed mid-write. Purging is
+//     included so a sweep interrupted partway retries instead of stranding a
+//     half-deleted site.
+func (d *Database) ListExpiredForSweep(ctx context.Context, limit int) ([]Deployment, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+
+	var out []Deployment
+	err := d.db.WithContext(ctx).
+		Where("claimed_at IS NULL").
+		Where("expires_at IS NOT NULL AND expires_at <= ?", time.Now().UTC()).
+		Where("status IN ?", []string{StatusLive, StatusPurging}).
+		Order("expires_at ASC").
+		Limit(limit).
+		Find(&out).Error
+	if err != nil {
+		return nil, fmt.Errorf("list expired for sweep: %w", err)
+	}
+	return out, nil
 }
 
 // ClaimPermanently redeems a claim token to stop a drop from expiring.
@@ -167,6 +412,9 @@ func (d *Database) ClaimPermanently(ctx context.Context, token, claimedBy string
 		Model(dep).
 		Clauses(clause.Returning{}).
 		Where("claim_token_hash = ? AND claimed_at IS NULL", hash).
+		// Only a live drop can be claimed. A pending one is still being
+		// written, and its objects may not all exist yet.
+		Where("status = ?", StatusLive).
 		// A drop whose window closed cannot be claimed even if the token is
 		// still valid and the row has not been swept yet.
 		Where("expires_at IS NOT NULL AND expires_at > ?", now).

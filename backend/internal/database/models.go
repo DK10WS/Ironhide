@@ -9,11 +9,22 @@ import (
 
 // Deployment states.
 //
-// A drop moves pending -> live on upload, and live -> expired when the claim
-// window closes. Claiming does not change the state, only the owner, because
-// a claimed drop is still live and still serves.
+// A deployment is written as pending before its objects exist, promoted to
+// live once they do, and abandoned as failed if the upload never completes.
+//
+// pending is what makes a failed upload findable: the row is created first,
+// so bytes never exist without a row describing them. A reconciler ages stuck
+// pending rows out to failed.
+//
+// Claiming does not change the state, only the owner, because a claimed drop
+// is still live and still serves.
 const (
 	StatusPending = "pending"
+	StatusFailed  = "failed"
+	// StatusPurging is a transient state: the row is about to lose its objects
+	// and then itself. It exists so a crash mid-delete leaves a findable
+	// record rather than an invisible half-deletion.
+	StatusPurging = "purging"
 	StatusLive    = "live"
 	StatusExpired = "expired"
 	StatusDeleted = "deleted"

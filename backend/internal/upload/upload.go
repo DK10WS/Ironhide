@@ -33,9 +33,21 @@ var (
 
 const prefixSegmentBytes = 8
 
-func newPrefix() string {
+// NewPrefix returns a fresh object-key prefix for one upload.
+//
+// Uniqueness comes from the server, not from the client: no part of this
+// value is derived from a filename, a domain or anything a caller can
+// influence. That is what guarantees an upload can never address another
+// upload's objects, or a claimed site.
+//
+// It is exported so the HTTP handler can write a deployment row before the
+// objects, which is what keeps bytes from existing with nothing describing
+// them. Only server-side code may pass the result back through Options.Prefix.
+func NewPrefix() string {
 	var b [prefixSegmentBytes]byte
 	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand does not fail on any supported platform. If it somehow
+		// did, a predictable prefix is far worse than crashing, so refuse.
 		panic(fmt.Sprintf("upload: crypto/rand unavailable: %v", err))
 	}
 	return "uploads/" + hex.EncodeToString(b[:]) + "/"
@@ -99,6 +111,17 @@ type Options struct {
 	// means every file moves when the folder is renamed.
 	FlattenRoot bool
 
+	// Prefix overrides the generated object prefix.
+	//
+	// It exists so a deployment row can be written before its objects, which
+	// is what prevents a failed upload from leaving bytes that nothing can
+	// find. Empty means generate one here, which is the default and what every
+	// caller except the HTTP handler wants.
+	//
+	// Only ever set it to a value from NewPrefix. Passing anything derived
+	// from a request would let one upload address another.
+	Prefix string
+
 	// RequireIndexHTML rejects an upload that has no index.html at its root.
 	//
 	// The check runs during planning, before anything is written. Rejecting
@@ -127,6 +150,11 @@ func (o Options) normalized() Options {
 		l.MaxEntries = d.MaxEntries
 	}
 	return Options{
+		// Prefix is carried through. Dropping it here silently regenerated
+		// one, so a caller that had already written a deployment row for this
+		// prefix stored the objects somewhere else and the site 404d. Every
+		// field must be listed explicitly because this rebuilds the struct.
+		Prefix:           o.Prefix,
 		Limits:           l,
 		FlattenRoot:      o.FlattenRoot,
 		RequireIndexHTML: o.RequireIndexHTML,
@@ -150,10 +178,19 @@ func FromZip(ctx context.Context, store ObjectStore, r io.Reader, opts Options) 
 	if err != nil {
 		return Result{}, err
 	}
-	return write(ctx, store, rootDir, files)
+	return write(ctx, store, rootDir, files, opts)
 }
 
-// write stores every planned file under one freshly generated prefix.
+// pickPrefix returns the caller-supplied prefix if there is one, and
+// generates a fresh one otherwise.
+func pickPrefix(o Options) string {
+	if o.Prefix != "" {
+		return o.Prefix
+	}
+	return NewPrefix()
+}
+
+// write stores every planned file under one prefix.
 //
 // The prefix is minted here, once, and never accepted from a caller. That is
 // the property that keeps one upload from addressing another: there is a
@@ -164,8 +201,8 @@ func FromZip(ctx context.Context, store ObjectStore, r io.Reader, opts Options) 
 // site references its assets by relative URL, and a browser resolves those
 // against the page's own path, so app.js is only found if it shares a prefix
 // with the index.html that links it.
-func write(ctx context.Context, store ObjectStore, rootDir string, files []planned) (Result, error) {
-	res := Result{Prefix: newPrefix(), RootDir: rootDir}
+func write(ctx context.Context, store ObjectStore, rootDir string, files []planned, opts Options) (Result, error) {
+	res := Result{Prefix: pickPrefix(opts), RootDir: rootDir}
 
 	for _, f := range files {
 		etag, err := store.PutObject(ctx, res.Prefix+f.rel, bytes.NewReader(f.data), int64(len(f.data)))
@@ -434,7 +471,7 @@ func FromFiles(ctx context.Context, store ObjectStore, files []IncomingFile, opt
 	if err != nil {
 		return Result{}, err
 	}
-	return write(ctx, store, "", planned)
+	return write(ctx, store, "", planned, opts)
 }
 
 // planFiles validates and reads every incoming file.

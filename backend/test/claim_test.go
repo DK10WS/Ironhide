@@ -72,8 +72,11 @@ func TestCreateDeploymentFillsEveryColumn(t *testing.T) {
 	if strings.HasPrefix(d.Prefix, "uploads/") == false {
 		t.Errorf("Prefix = %q", d.Prefix)
 	}
-	if d.Status != database.StatusLive {
-		t.Errorf("Status = %q, want live", d.Status)
+	// A deployment is written before its objects, so it starts pending. This
+	// is what keeps a failed upload findable: the row exists, the objects may
+	// not, and the reconciler can find it with an indexed query.
+	if d.Status != database.StatusPending {
+		t.Errorf("Status = %q, want pending", d.Status)
 	}
 	if d.FileCount != 2 || d.Bytes != 27 {
 		t.Errorf("FileCount = %d, Bytes = %d, want 2 and 27", d.FileCount, d.Bytes)
@@ -120,6 +123,8 @@ func TestCreateDeploymentFillsEveryColumn(t *testing.T) {
 func TestOwnedDeploymentNeverExpires(t *testing.T) {
 	db := liveDB(t)
 
+	// An owned deployment is born live: it has no upload phase, so there is
+	// nothing to promote.
 	res := mustCreate(t, db, database.CreateDeploymentInput{
 		Prefix:    uniquePrefix(t),
 		Files:     manifest(),
@@ -168,7 +173,7 @@ func TestClaimIsSingleUse(t *testing.T) {
 
 	const racers = 16
 
-	created := mustCreate(t, db, database.CreateDeploymentInput{
+	created := mustCreateLive(t, db, database.CreateDeploymentInput{
 		Prefix: uniquePrefix(t),
 		Files:  manifest(),
 		TTL:    time.Hour,
@@ -428,7 +433,7 @@ func TestCreateRejectsNegativeTTL(t *testing.T) {
 func TestZeroTTLMakesADropPermanent(t *testing.T) {
 	db := liveDB(t)
 
-	res := mustCreate(t, db, database.CreateDeploymentInput{
+	res := mustCreateLive(t, db, database.CreateDeploymentInput{
 		Prefix: uniquePrefix(t),
 		Files:  manifest(),
 		TTL:    0,
@@ -461,7 +466,7 @@ func TestClaimPermanentlyClearsExpiry(t *testing.T) {
 	db := liveDB(t)
 	ctx := context.Background()
 
-	created := mustCreate(t, db, database.CreateDeploymentInput{
+	created := mustCreateLive(t, db, database.CreateDeploymentInput{
 		Prefix: uniquePrefix(t), Files: manifest(), TTL: time.Hour,
 	})
 	if created.Deployment.ExpiresAt == nil {

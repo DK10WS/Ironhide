@@ -13,6 +13,8 @@ import (
 	"github.com/dk10ws/ironhide/internal/config"
 	"github.com/dk10ws/ironhide/internal/database"
 	"github.com/dk10ws/ironhide/internal/garage"
+	"github.com/dk10ws/ironhide/internal/lifecycle"
+	"github.com/dk10ws/ironhide/internal/reconciler"
 )
 
 func main() {
@@ -52,6 +54,24 @@ func run(ctx context.Context) error {
 	store, err := garage.NewStore(ctx, cfg)
 	if err != nil {
 		return err
+	}
+
+	// Background maintenance, started here rather than in the router so it is
+	// tied to the process lifecycle and never runs during tests.
+	//
+	// The reconciler abandons uploads that never finished. Destruction is
+	// opt-in and off by default: it is the only code that deletes objects, and
+	// a fresh checkout should not start removing things unasked.
+	if cfg.Reconcile.Interval > 0 {
+		go reconciler.New(db).Run(ctx, cfg.Reconcile.Interval)
+	}
+	if cfg.Purge.Interval > 0 {
+		go lifecycle.New(db, store).Run(ctx, cfg.Purge.Interval)
+	}
+	// Removing expired drops shares the purger's deletion path, so there is one
+	// place that deletes objects rather than two.
+	if cfg.Sweep.Interval > 0 {
+		go lifecycle.NewSweeper(db, store).Run(ctx, cfg.Sweep.Interval)
 	}
 
 	slog.Info("starting",

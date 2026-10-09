@@ -60,6 +60,14 @@ func record(t *testing.T, db *database.Database, res upload.Result, ttl time.Dur
 		return err
 	}
 
+	// CreateDeployment writes the row pending; the upload then promotes it.
+	// Tests that want a servable site have to do the same promotion, which is
+	// the same two steps the handler performs.
+	if err := db.RecordUpload(context.Background(), created.Deployment.ID, res); err != nil {
+		return err
+	}
+	_ = entries
+
 	// Registered here so every caller that records a deployment cleans up,
 	// rather than each one remembering to.
 	cleanupDeployments(t, db, created.Deployment.Prefix)
@@ -173,7 +181,10 @@ func cleanupDeployments(t *testing.T, db *database.Database, prefixes ...string)
 //
 // Every deployment-creating test goes through this rather than calling
 // CreateDeployment directly, so no test can forget to register cleanup and
-// leave a live row behind for the next run to trip over.
+// leave a row behind for the next run to trip over.
+//
+// The row is left pending, matching what the handler writes before an upload
+// starts. Use mustCreateLive when the test needs a claimable or servable drop.
 func mustCreate(t *testing.T, db *database.Database, in database.CreateDeploymentInput) *database.CreateDeploymentResult {
 	t.Helper()
 
@@ -182,6 +193,18 @@ func mustCreate(t *testing.T, db *database.Database, in database.CreateDeploymen
 		t.Fatalf("CreateDeployment: %v", err)
 	}
 	cleanupDeployments(t, db, res.Deployment.Prefix)
+	return res
+}
+
+// mustCreateLive inserts a deployment and promotes it to live, which is the
+// second step the handler performs once the objects are stored.
+func mustCreateLive(t *testing.T, db *database.Database, in database.CreateDeploymentInput) *database.CreateDeploymentResult {
+	t.Helper()
+
+	res := mustCreate(t, db, in)
+	if err := db.RecordUpload(context.Background(), res.Deployment.ID, upload.Result{Bytes: 27}); err != nil {
+		t.Fatalf("RecordUpload: %v", err)
+	}
 	return res
 }
 

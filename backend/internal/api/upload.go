@@ -70,12 +70,10 @@ func (h *Handler) uploadZip(c *gin.Context) {
 		RequireIndexHTML: true,
 	}
 
-	res, err := upload.FromZip(c.Request.Context(), h.store, bytes.NewReader(raw), opts)
-	if err != nil {
-		h.fail(c, err)
-		return
-	}
-	h.respondCreated(c, res)
+	h.storeUpload(c, func(prefix string) (upload.Result, error) {
+		opts.Prefix = prefix
+		return upload.FromZip(c.Request.Context(), h.store, bytes.NewReader(raw), opts)
+	})
 }
 
 func (h *Handler) uploadFile(c *gin.Context) {
@@ -89,16 +87,14 @@ func (h *Handler) uploadFile(c *gin.Context) {
 		return
 	}
 
-	res, err := upload.FromSingleFile(c.Request.Context(), h.store,
-		parts[0].name, bytes.NewReader(parts[0].data), int64(len(parts[0].data)), upload.Options{
-			Limits:           h.cfg.Upload.Limits(),
-			RequireIndexHTML: true,
-		})
-	if err != nil {
-		h.fail(c, err)
-		return
-	}
-	h.respondCreated(c, res)
+	h.storeUpload(c, func(prefix string) (upload.Result, error) {
+		return upload.FromSingleFile(c.Request.Context(), h.store,
+			parts[0].name, bytes.NewReader(parts[0].data), int64(len(parts[0].data)), upload.Options{
+				Limits:           h.cfg.Upload.Limits(),
+				RequireIndexHTML: true,
+				Prefix:           prefix,
+			})
+	})
 }
 
 func (h *Handler) uploadFiles(c *gin.Context) {
@@ -121,15 +117,13 @@ func (h *Handler) uploadFiles(c *gin.Context) {
 		})
 	}
 
-	res, err := upload.FromFiles(c.Request.Context(), h.store, files, upload.Options{
-		Limits:           h.cfg.Upload.Limits(),
-		RequireIndexHTML: true,
+	h.storeUpload(c, func(prefix string) (upload.Result, error) {
+		return upload.FromFiles(c.Request.Context(), h.store, files, upload.Options{
+			Limits:           h.cfg.Upload.Limits(),
+			RequireIndexHTML: true,
+			Prefix:           prefix,
+		})
 	})
-	if err != nil {
-		h.fail(c, err)
-		return
-	}
-	h.respondCreated(c, res)
 }
 
 // part is one file part, already read into memory under the request cap.
@@ -227,44 +221,92 @@ func parseErr(err error) error {
 	return fmt.Errorf("%w: malformed multipart body: %v", upload.ErrInvalidArchive, err)
 }
 
-// respondCreated records the deployment and returns the drop URLs.
-func (h *Handler) respondCreated(c *gin.Context, res upload.Result) {
-	entries := make([]database.ManifestEntry, 0, len(res.Files))
-	for _, f := range res.Files {
-		entries = append(entries, database.ManifestEntry{Key: f.Key, Size: f.Size, ETag: f.ETag})
-	}
+// storeUpload runs the three-step write for every upload shape.
+//
+// The order is the point:
+//
+//  1. create a deployment row, still pending, carrying the object prefix
+//  2. write the objects under that prefix
+//  3. promote the row to live
+//
+// Because the row is written first, bytes can never exist without a row
+// describing them. The failure mode is the reverse — a pending row with no or
+// partial objects — and that direction is the cheap one to clean up, because
+// Postgres can find it with an indexed query while orphaned objects would
+// require listing every key in the bucket.
+func (h *Handler) storeUpload(c *gin.Context, store func(prefix string) (upload.Result, error)) {
+	// The prefix is generated here rather than inside upload so the row can
+	// carry it. It is still server-generated: nothing about it comes from the
+	// request, which is what keeps one upload from addressing another.
+	prefix := upload.NewPrefix()
 
 	created, err := h.db.CreateDeployment(c.Request.Context(), database.CreateDeploymentInput{
-		Prefix: res.Prefix,
-		Files:  entries,
+		Prefix: prefix,
 		TTL:    h.cfg.Upload.TTL,
 	})
 	if err != nil {
-		// The objects are already in the bucket. The row is missing, so the
-		// sweeper cannot find these objects later; log the prefix loudly so
-		// they are recoverable rather than silently orphaned.
-		slog.Error("deployment insert failed, objects orphaned",
-			"prefix", res.Prefix, "files", len(res.Files), "err", err)
 		h.fail(c, err)
 		return
 	}
 
-	d := created.Deployment
+	// No files are known yet, so the row starts empty and MarkLive fills in
+	// the real counts from the upload result.
+	res, err := store(prefix)
+	if err != nil {
+		h.abandonUpload(c, created.Deployment.ID, res, err)
+		return
+	}
+
+	if err := h.db.RecordUpload(c.Request.Context(), created.Deployment.ID, res); err != nil {
+		// The objects are stored but the manifest could not be written, so
+		// the row cannot describe them. Fail it rather than serving a site
+		// whose recorded contents disagree with the bucket.
+		h.abandonUpload(c, created.Deployment.ID, res, err)
+		return
+	}
+
 	slog.Info("upload accepted",
-		"prefix", d.Prefix,
+		"id", created.Deployment.ID,
+		"prefix", created.Deployment.Prefix,
 		"files", len(res.Files),
 		"bytes", res.Bytes,
-		"id", d.ID,
 	)
 
 	c.JSON(http.StatusCreated, gin.H{
-		"id":          d.ID,
-		"preview_url": h.previewURL(d.Slug()),
+		"id":          created.Deployment.ID,
+		"preview_url": h.previewURL(created.Deployment.Slug()),
 		"claim_url":   h.claimURL(created.ClaimToken),
-		"expires_at":  expiresAt(d),
+		"expires_at":  expiresAt(created.Deployment),
 		"bytes":       res.Bytes,
 		"files":       res.Files,
 	})
+}
+
+// abandonUpload deals with the row for an upload that did not finish.
+//
+// If nothing was written the row is deleted outright, because a row exists to
+// describe objects and there are none. Keeping a failed row per rejected
+// request would let an unauthenticated caller fill the deployments table for
+// free, and almost every rejection is a validation failure that never touched
+// the bucket.
+//
+// If objects did land, the row is marked failed instead: the reconciler will
+// report the prefix so whatever was written can be found, and nothing is lost.
+func (h *Handler) abandonUpload(c *gin.Context, id uint, res upload.Result, cause error) {
+	ctx := c.Request.Context()
+
+	var cleanupErr error
+	if len(res.Files) == 0 {
+		cleanupErr = h.db.DeleteDeployment(ctx, id)
+	} else {
+		cleanupErr = h.db.MarkFailed(ctx, id)
+	}
+	if cleanupErr != nil {
+		slog.Error("could not clean up a failed upload",
+			"id", id, "prefix", res.Prefix, "err", cleanupErr)
+	}
+
+	h.fail(c, cause)
 }
 
 // expiresAt renders the claim deadline, or null when the deployment is

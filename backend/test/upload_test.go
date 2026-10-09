@@ -544,3 +544,68 @@ func TestPreBufferedDataIsNotCopied(t *testing.T) {
 		t.Errorf("stored %q, want %q", b, payload)
 	}
 }
+
+// TestCallerSuppliedPrefixIsUsed is the regression test for a field being
+// dropped by Options.normalized, which regenerated the prefix. The caller had
+// already written a deployment row for it, so the objects landed somewhere
+// else and the site 404d while the row looked fine.
+func TestCallerSuppliedPrefixIsUsed(t *testing.T) {
+	for name, run := range map[string]func(prefix string, fs *fakeStore) error{
+		"FromFiles": func(prefix string, fs *fakeStore) error {
+			opts := upload.DefaultOptions()
+			opts.Prefix = prefix
+			_, err := upload.FromFiles(context.Background(), fs, []upload.IncomingFile{
+				{Name: "index.html", Body: strings.NewReader("<h1>x</h1>"), Size: -1},
+			}, opts)
+			return err
+		},
+		"FromZip": func(prefix string, fs *fakeStore) error {
+			opts := upload.DefaultOptions()
+			opts.Prefix = prefix
+			_, err := upload.FromZip(context.Background(), fs,
+				bytes.NewReader(buildZip(t, zipEntry{name: "index.html", body: "<h1>x</h1>"})), opts)
+			return err
+		},
+		"FromSingleFile": func(prefix string, fs *fakeStore) error {
+			opts := upload.DefaultOptions()
+			opts.Prefix = prefix
+			body := "<h1>x</h1>"
+			_, err := upload.FromSingleFile(context.Background(), fs, "index.html",
+				strings.NewReader(body), int64(len(body)), opts)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			prefix := upload.NewPrefix()
+			fs := &fakeStore{}
+
+			if err := run(prefix, fs); err != nil {
+				t.Fatalf("upload: %v", err)
+			}
+
+			if fs.count() == 0 {
+				t.Fatal("nothing was written")
+			}
+			for _, k := range fs.keys() {
+				if !strings.HasPrefix(k, prefix) {
+					t.Errorf("stored at %q, want under the supplied prefix %q", k, prefix)
+				}
+			}
+		})
+	}
+}
+
+// TestEmptyPrefixStillGeneratesOne guards the other direction: an unset Prefix
+// must keep generating, not producing an empty key.
+func TestEmptyPrefixStillGeneratesOne(t *testing.T) {
+	fs := &fakeStore{}
+	res, err := upload.FromFiles(context.Background(), fs, []upload.IncomingFile{
+		{Name: "index.html", Body: strings.NewReader("x"), Size: -1},
+	}, upload.DefaultOptions())
+	if err != nil {
+		t.Fatalf("FromFiles: %v", err)
+	}
+	if !strings.HasPrefix(res.Prefix, "uploads/") || res.Prefix == "" {
+		t.Errorf("Prefix = %q, want a generated uploads/<id>/", res.Prefix)
+	}
+}

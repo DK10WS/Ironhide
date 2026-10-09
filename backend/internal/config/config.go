@@ -46,6 +46,41 @@ type Config struct {
 
 	// Upload settings.
 	Upload Upload
+
+	// Reconcile controls the stuck-upload reconciler.
+	Reconcile Reconcile
+
+	// Purge controls destruction of failed deployments.
+	Purge Purge
+
+	// Sweep controls removal of expired, unclaimed drops.
+	Sweep Sweep
+}
+
+// Sweep controls how often expired drops lose their objects.
+//
+// Interval zero disables it. Unlike the purger this needs no default grace of
+// its own: the expiry is the contract, and the serve path already answers 410
+// once the window closes.
+type Sweep struct {
+	Interval time.Duration
+}
+
+// Purge controls how often failed deployments lose their objects.
+//
+// Interval zero disables it. It is off by default because it is the only
+// component that deletes data, and a fresh checkout should not start removing
+// things on its own.
+type Purge struct {
+	Interval time.Duration
+}
+
+// Reconcile controls how often stuck uploads are abandoned.
+//
+// Interval zero disables it, which is what the test suite relies on so no
+// background pass can delete a row a test is asserting on.
+type Reconcile struct {
+	Interval time.Duration
 }
 
 // Upload caps what a single request may cost.
@@ -154,6 +189,20 @@ func Load() (Config, error) {
 			Database: env("POSTGRES_DB", "ironhide"),
 			// Local dev has no TLS; require it anywhere real.
 			SSLMode: env("POSTGRES_SSLMODE", "disable"),
+		},
+
+		Purge: Purge{
+			Interval: time.Duration(envInt64("PURGE_INTERVAL_SECONDS", 0)) * time.Second,
+		},
+
+		Sweep: Sweep{
+			Interval: time.Duration(envInt64("SWEEP_INTERVAL_SECONDS", 0)) * time.Second,
+		},
+
+		Reconcile: Reconcile{
+			// Zero disables the reconciler, so a bare `go run` does not age
+			// out rows that a developer is looking at.
+			Interval: time.Duration(envInt64("RECONCILE_INTERVAL_SECONDS", 0)) * time.Second,
 		},
 
 		Upload: Upload{
