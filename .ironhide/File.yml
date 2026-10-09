@@ -6,15 +6,15 @@ info:
 http:
   method: POST
   url: "{{BaseUrl}}/upload/file"
-  auth:
-    type: bearer
-    token: "{{UploadToken}}"
   body:
     type: multipart-form
     data:
       - name: file
         type: file
-        value: ./index.html
+        value: []
+  auth:
+    type: bearer
+    token: "{{UploadToken}}"
 
 settings:
   encodeUrl: true

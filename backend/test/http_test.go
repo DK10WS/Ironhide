@@ -77,6 +77,13 @@ func (m *memStore) GetObject(_ context.Context, key string) (io.ReadCloser, int6
 // means a real Postgres.
 func newTestServer(t *testing.T) (*httptest.Server, *database.Database, *memStore) {
 	t.Helper()
+	return newTestServerWithConfig(t, testConfig())
+}
+
+// newTestServerWithConfig is the seam for the tests that need a configuration
+// testConfig does not produce, such as a data suffix that pins a port.
+func newTestServerWithConfig(t *testing.T, cfg config.Config) (*httptest.Server, *database.Database, *memStore) {
+	t.Helper()
 
 	host := os.Getenv("TEST_POSTGRES_HOST")
 	if host == "" {
@@ -101,7 +108,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *database.Database, *memStor
 	}
 
 	store := newMemStore()
-	srv := httptest.NewServer(api.NewRouter(testConfig(), store, db))
+	srv := httptest.NewServer(api.NewRouter(cfg, store, db))
 	t.Cleanup(srv.Close)
 
 	return srv, db, store
@@ -200,6 +207,60 @@ func TestDataHostSuffixIsAnchored(t *testing.T) {
 	}
 }
 
+// TestDataHostSuffixMayPinAPort is the regression for a real 404. The Host
+// header has its port cut off before the suffix is compared, so a suffix that
+// pinned one could never match and every preview resolved to nothing.
+//
+// The port has to survive in the built URL, because that is how the URL reaches
+// the listener, and be dropped before the comparison, because the Host header
+// no longer carries it. Nothing else can satisfy both.
+func TestDataHostSuffixMayPinAPort(t *testing.T) {
+	suffix := dataSuffix + ":8443"
+
+	cfg := testConfig()
+	cfg.DataHostSuffix = suffix
+
+	srv, db, store := newTestServerWithConfig(t, cfg)
+
+	res, err := upload.FromZip(context.Background(), store,
+		bytesReader(t, siteZip(t)), upload.DefaultOptions())
+	if err != nil {
+		t.Fatalf("FromZip: %v", err)
+	}
+	if err := record(t, db, res, time.Hour); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	slug := lastSegment(res.Prefix)
+
+	// The port is not part of the deployment's identity, only of how the URL
+	// reaches it, so a Host without one names the same origin behind a proxy
+	// that terminated it.
+	resolves := []string{
+		slug + suffix,
+		slug + dataSuffix,
+		strings.ToUpper(slug) + suffix,
+	}
+	for _, host := range resolves {
+		if got := do(t, srv, "GET", host, "/", nil).StatusCode; got != http.StatusOK {
+			t.Errorf("GET / with host %q = %d, want 200", host, got)
+		}
+	}
+
+	// The anchoring has to survive the strip, or this fix would trade a 404 for a
+	// way to address a deployment from a domain that has nothing to do with it.
+	refused := []string{
+		slug + suffix + ".attacker.example",
+		"evil." + slug + suffix,
+		"nothex" + suffix,
+		slug + dataSuffix + ".attacker.example",
+	}
+	for _, host := range refused {
+		if got := do(t, srv, "GET", host, "/", nil).StatusCode; got != http.StatusNotFound {
+			t.Errorf("GET / with host %q = %d, want 404", host, got)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Serving
 // ---------------------------------------------------------------------------
@@ -235,8 +296,16 @@ func TestServesIndexAndAssetsWithHeaders(t *testing.T) {
 	if resp.Header.Get("X-Robots-Tag") == "" {
 		t.Error("missing noindex")
 	}
-	if got := resp.Header.Get("Content-Security-Policy"); !strings.Contains(got, "default-src 'self'") {
+	if got := resp.Header.Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'none'") {
 		t.Errorf("CSP = %q", got)
+	}
+	// An asset allowlist that admits only 'self' rejects inline scripts, inline
+	// styles, data: URIs and CDN files, so any such site arrives as a blank
+	// page. Only the directives that cost a legitimate site nothing belong here.
+	for _, banned := range []string{"default-src", "script-src", "style-src"} {
+		if strings.Contains(resp.Header.Get("Content-Security-Policy"), banned) {
+			t.Errorf("CSP = %q, should not carry %q", resp.Header.Get("Content-Security-Policy"), banned)
+		}
 	}
 
 	// A content-addressed asset is immutable.

@@ -60,11 +60,14 @@ func (h *Handler) serve(c *gin.Context) {
 // Only the leftmost label is considered, and only if it is a plausible slug,
 // so "a.b.preview.example.com" cannot address the deployment named "b".
 func (h *Handler) slugFromHost(host string) (string, bool) {
-	hst, _, _ := strings.Cut(host, ":")
+	hst, ok := hostName(host)
+	if !ok {
+		return "", false
+	}
+
+	suffix := "." + strings.TrimPrefix(strings.ToLower(hostSuffix(h.cfg.DataHostSuffix)), ".")
 
 	hst = strings.ToLower(hst)
-	suffix := "." + strings.TrimPrefix(strings.ToLower(h.cfg.DataHostSuffix), ".")
-
 	if !strings.HasSuffix(hst, suffix) {
 		return "", false
 	}
@@ -73,6 +76,42 @@ func (h *Handler) slugFromHost(host string) (string, bool) {
 		return "", false
 	}
 	return slug, true
+}
+
+// hostName returns the host part of a host[:port] pair, and reports false when
+// the pair is not one.
+//
+// The port is only removed when it really is a port. Cutting at the first colon
+// instead would throw away whatever follows it, so
+// "abc.preview.example.com:8443.attacker.net" would arrive as the legitimate
+// "abc.preview.example.com" and be served. Refusing a host whose tail is not
+// numeric keeps the suffix anchored to the end of the whole name.
+//
+// The config may pin a port, which is how the URL previewURL builds reaches this
+// listener. That port is part of the URL and not part of the name, so it comes
+// off the suffix here; a Host that omits it still names the same deployment.
+func hostName(host string) (string, bool) {
+	name, port, found := strings.Cut(host, ":")
+	if !found {
+		return name, true
+	}
+	if port == "" {
+		return "", false
+	}
+	for _, r := range port {
+		if r < '0' || r > '9' {
+			return "", false
+		}
+	}
+	return name, true
+}
+
+// hostSuffix drops any port from a configured data host suffix.
+func hostSuffix(suffix string) string {
+	if i := strings.Index(suffix, ":"); i >= 0 {
+		suffix = suffix[:i]
+	}
+	return suffix
 }
 
 // validSlug accepts the 16 hex characters newPrefix generates. Being strict
@@ -171,12 +210,18 @@ func (h *Handler) writeObject(c *gin.Context, key string, size int64, body io.Re
 		c.Header("Cache-Control", "no-cache")
 	}
 
-	// Data-plane hardening. These are the headers that keep a hostile upload
-	// from being useful: it cannot execute script against another origin, it
-	// cannot be sniffed into a type it did not claim, and it cannot leak the
-	// referrer of a visitor who followed a link from somewhere private.
+	// Data-plane hardening. A deployment is already isolated by its own origin,
+	// so there is nothing here for a hostile upload to reach and no cookie scope
+	// to abuse. These are the parts that cost a legitimate site nothing:
+	// clickjacking, base-tag hijacking, and posting a form off-origin.
+	//
+	// There is deliberately no default-src or script-src. Those are asset
+	// allowlists, and an allowlist that admits only 'self' rejects inline
+	// scripts, inline styles, data: URIs and CDN-hosted files, which is most
+	// real sites. Serving them meant serving a blank page: the HTML arrived with
+	// 200 and the browser refused to run any of it.
 	c.Header("X-Content-Type-Options", "nosniff")
-	c.Header("Content-Security-Policy", "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	c.Header("Content-Security-Policy", "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 	c.Header("Referrer-Policy", "no-referrer")
 	c.Header("X-Robots-Tag", "noindex, nofollow")
 

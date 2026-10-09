@@ -6,21 +6,23 @@ info:
 http:
   method: POST
   url: "{{BaseUrl}}/upload/files"
-  auth:
-    type: bearer
-    token: "{{UploadToken}}"
   body:
     type: multipart-form
     data:
       - name: file
         type: file
-        value: ./site/index.html
+        value:
+          - /home/DK10/Downloads/personal-blog-website-main/index.html
       - name: file
         type: file
-        value: ./site/assets/app.js
+        value:
+          - /home/DK10/Downloads/personal-blog-website-main/assets/css/style.css
       - name: file
-        type: file
-        value: ./site/assets/style.css
+        type: text
+        value: ""
+  auth:
+    type: bearer
+    token: "{{UploadToken}}"
 
 settings:
   encodeUrl: true

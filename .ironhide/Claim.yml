@@ -1,13 +1,11 @@
 info:
   name: Claim drop
   type: http
-  seq: 6
+  seq: 7
 
 http:
   method: POST
   url: "{{BaseUrl}}/claim/{{ClaimToken}}"
-  auth:
-    type: none
 
 settings:
   encodeUrl: true

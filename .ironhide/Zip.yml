@@ -1,11 +1,22 @@
 info:
   name: Zip
   type: http
-  seq: 2
+  seq: 3
 
 http:
   method: POST
-  url: "{{BaseUrl}}/upload/zip"
+  url: "{{BaseUrl}}/upload/zip?flatten=true"
+  params:
+    - name: flatten
+      value: "true"
+      type: query
+  body:
+    type: multipart-form
+    data:
+      - name: file
+        type: file
+        value:
+          - /home/DK10/Downloads/personal-blog-website-main(1).zip
   auth: inherit
 
 settings:
