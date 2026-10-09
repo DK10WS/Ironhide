@@ -86,6 +86,11 @@ services:
       retries: 12
     restart: unless-stopped
 
+  frontend:
+    build: frontend/
+    ports:
+      - "7210:8080"
+
 volumes:
   garage-meta:
   garage-data:
