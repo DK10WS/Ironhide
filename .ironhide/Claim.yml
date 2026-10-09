@@ -1,0 +1,31 @@
+info:
+  name: Claim drop
+  type: http
+  seq: 6
+
+http:
+  method: POST
+  url: "{{BaseUrl}}/claim/{{ClaimToken}}"
+  auth:
+    type: none
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+docs: |-
+  Keeps a drop alive by clearing its expiry.
+
+  Set ClaimToken to the last path segment of claim_url from any upload
+  response.
+
+  This request is deliberately unauthenticated. The token in the path is the
+  authorization: it is 256 bits of generated randomness, stored only as a
+  SHA-256 hash, and anyone holding it can claim. Adding a second credential
+  here would mean the claim link stops working on its own, which is the one
+  property that makes a drop shareable.
+
+  Claiming is permanent and single use. A second claim with the same token
+  returns 410.

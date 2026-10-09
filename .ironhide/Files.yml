@@ -1,0 +1,38 @@
+info:
+  name: Upload multiple files
+  type: http
+  seq: 5
+
+http:
+  method: POST
+  url: "{{BaseUrl}}/upload/files"
+  auth:
+    type: bearer
+    token: "{{UploadToken}}"
+  body:
+    type: multipart-form
+    data:
+      - name: file
+        type: file
+        value: ./site/index.html
+      - name: file
+        type: file
+        value: ./site/assets/app.js
+      - name: file
+        type: file
+        value: ./site/assets/style.css
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+docs: |-
+  Uploads several files that land under one shared prefix.
+
+  Filenames are used exactly as sent, including any directory part, so
+  "./site/assets/app.js" becomes assets/app.js on the served site. That is
+  what keeps relative URLs in the page working.
+
+  Requires the bearer credential.

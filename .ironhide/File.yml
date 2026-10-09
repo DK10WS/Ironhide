@@ -1,0 +1,31 @@
+info:
+  name: Upload single file
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: "{{BaseUrl}}/upload/file"
+  auth:
+    type: bearer
+    token: "{{UploadToken}}"
+  body:
+    type: multipart-form
+    data:
+      - name: file
+        type: file
+        value: ./index.html
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+docs: |-
+  Uploads exactly one file.
+
+  The single file becomes index.html at the site root, so it is served for
+  the bare host as well as for /index.html.
+
+  Requires the bearer credential.
