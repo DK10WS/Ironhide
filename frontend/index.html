@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ironhide</title>
+    <meta name="description" content="Upload a built site and get your own address for it." />
+    <meta property="og:title" content="Ironhide" />
+    <meta property="og:description" content="Upload a built site and get your own address for it." />
+    <meta property="og:type" content="website" />
+    <script>
+      // Runs before first paint so a dark-mode visitor never sees a white flash.
+      // The key matches src/lib/theme.ts, which cannot be imported from here.
+      try {
+        const stored = localStorage.getItem("ironhide-theme");
+        const dark =
+          stored === "dark" ||
+          (stored !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.classList.toggle("dark", dark);
+      } catch {}
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
