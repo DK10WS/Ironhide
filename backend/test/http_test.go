@@ -145,7 +145,7 @@ func TestControlRoutesOnlyAnswerOnTheControlHost(t *testing.T) {
 
 	upload := func(host string) int {
 		body, ct := multipartBody(t, "index.html", "<h1>x</h1>")
-		resp := doMultipart(t, srv, host, "/upload/files", body, ct)
+		resp := doMultipart(t, srv, host, "/api/upload/files", body, ct)
 		if resp.StatusCode == http.StatusCreated {
 			got, _ := io.ReadAll(resp.Body)
 			cleanupPrefixFromBody(t, db, got)
@@ -154,21 +154,21 @@ func TestControlRoutesOnlyAnswerOnTheControlHost(t *testing.T) {
 	}
 
 	if got := upload(controlHost); got != http.StatusCreated {
-		t.Errorf("POST /upload/files on the control host = %d, want 201", got)
+		t.Errorf("POST /api/upload/files on the control host = %d, want 201", got)
 	}
 	if got := upload("4a50b157cc8b9cd3" + dataSuffix); got != http.StatusNotFound {
-		t.Errorf("POST /upload/files on a data host = %d, want 404", got)
+		t.Errorf("POST /api/upload/files on a data host = %d, want 404", got)
 	}
 }
 
 func TestHealthOnlyAnswersOnTheControlHost(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 
-	if got := do(t, srv, "GET", controlHost, "/health", nil).StatusCode; got != http.StatusOK {
-		t.Errorf("GET /health on the control host = %d, want 200", got)
+	if got := do(t, srv, "GET", controlHost, "/api/health", nil).StatusCode; got != http.StatusOK {
+		t.Errorf("GET /api/health on the control host = %d, want 200", got)
 	}
-	if got := do(t, srv, "GET", "4a50b157cc8b9cd3"+dataSuffix, "/health", nil).StatusCode; got != http.StatusNotFound {
-		t.Errorf("GET /health on a data host = %d, want 404", got)
+	if got := do(t, srv, "GET", "4a50b157cc8b9cd3"+dataSuffix, "/api/health", nil).StatusCode; got != http.StatusNotFound {
+		t.Errorf("GET /api/health on a data host = %d, want 404", got)
 	}
 }
 
@@ -379,7 +379,7 @@ func TestUploadRejectionsAreActionable(t *testing.T) {
 
 	send := func(filename string, content []byte) (int, string) {
 		body, ct := multipartBody(t, filename, string(content))
-		resp := doMultipart(t, srv, controlHost, "/upload/files", body, ct)
+		resp := doMultipart(t, srv, controlHost, "/api/upload/files", body, ct)
 		b, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode == http.StatusCreated {
 			cleanupPrefixFromBody(t, db, b)
@@ -401,14 +401,14 @@ func TestUploadRejectionsAreActionable(t *testing.T) {
 func TestNonMultipartBodyIsRejected(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 
-	resp := do(t, srv, "POST", controlHost, "/upload/files", strings.NewReader("raw"))
+	resp := do(t, srv, "POST", controlHost, "/api/upload/files", strings.NewReader("raw"))
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("non-multipart upload = %d, want 400", resp.StatusCode)
 	}
 }
 
 // TestClaimTokenIsNotLogged is a regression test for a real leak: the request
-// logger recorded the URL path verbatim, and for POST /claim/<token> that path
+// logger recorded the URL path verbatim, and for POST /api/claim/<token> that path
 // is the only credential on the route.
 func TestClaimTokenIsNotLogged(t *testing.T) {
 	// This asserts the observable property rather than reaching into the
@@ -431,12 +431,12 @@ func TestClaimTokenIsNotLogged(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
 	defer slog.SetDefault(prev)
 
-	do(t, srv, "POST", controlHost, "/claim/"+token, nil)
+	do(t, srv, "POST", controlHost, "/api/claim/"+token, nil)
 
 	if strings.Contains(buf.String(), token) {
 		t.Errorf("the claim token leaked into the logs:\n%s", buf.String())
 	}
-	if !strings.Contains(buf.String(), "/claim/***") {
+	if !strings.Contains(buf.String(), "/api/claim/***") {
 		t.Errorf("expected a redacted path, got:\n%s", buf.String())
 	}
 }

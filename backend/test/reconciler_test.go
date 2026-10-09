@@ -286,7 +286,7 @@ func TestRejectedUploadsLeaveNoRow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			before := count()
 			body, ct := tc.body(t)
-			resp := doMultipart(t, srv, controlHost, "/upload/files", body, ct)
+			resp := doMultipart(t, srv, controlHost, "/api/upload/files", body, ct)
 			if resp.StatusCode == http.StatusCreated {
 				t.Fatalf("expected a rejection, got 201")
 			}

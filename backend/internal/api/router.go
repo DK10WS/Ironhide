@@ -2,7 +2,7 @@
 //
 // It serves two planes on one listener:
 //
-//	<control host>            control plane: /upload, /claim, /health, /mcp
+//	<control host>/api/       control plane: /api/upload, /api/claim, /api/health
 //	<slug><data suffix>/      data plane: the uploaded sites
 //
 // The split exists because the data plane serves content anyone can upload.
@@ -53,7 +53,7 @@ func NewRouter(cfg config.Config, store objectStore, db *database.Database) *gin
 	r := gin.New()
 	r.Use(gin.Recovery(), requestLogger())
 
-	control := r.Group("/", onlyControlHost(cfg.ControlHost))
+	control := r.Group("/api", onlyControlHost(cfg.ControlHost))
 	{
 		control.GET("/health", h.health)
 		control.GET("/health/ready", h.ready)
@@ -190,7 +190,7 @@ func requestLogger() gin.HandlerFunc {
 // onward to a collector. Gin's own recovery log can include the path too, so
 // this is not the only place the value could escape.
 func redactPath(p string) string {
-	const prefix = "/claim/"
+	const prefix = "/api/claim/"
 	if !strings.HasPrefix(p, prefix) {
 		return p
 	}

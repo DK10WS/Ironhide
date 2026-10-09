@@ -23,22 +23,6 @@ services:
       retries: 10
     restart: unless-stopped
 
-  garage-ui:
-    image: noooste/garage-ui:v0.13.0@sha256:a1444fa10585a0efc8ce3c33ebda873e5714d51dbc8f7f49d00143ff3b72fcc2
-    depends_on:
-      garage:
-        condition: service_healthy
-    environment:
-      GARAGE_UI_GARAGE_ENDPOINT: http://garage:3900
-      GARAGE_UI_GARAGE_ADMIN_ENDPOINT: http://garage:3903
-      GARAGE_UI_GARAGE_ADMIN_TOKEN: ${GARAGE_ADMIN_TOKEN}
-      GARAGE_UI_GARAGE_REGION: ${IRONHIDE_S3_REGION}
-      GARAGE_UI_AUTH_TOKEN_ENABLED: "true"
-      GARAGE_UI_SERVER_HOST: 0.0.0.0
-    ports:
-      - "8080:8080"
-
-    restart: unless-stopped
 
   backend:
     build: backend/
