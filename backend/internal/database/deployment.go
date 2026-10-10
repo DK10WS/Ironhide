@@ -467,7 +467,25 @@ func (d *Database) GetDeploymentByPrefix(ctx context.Context, prefix string) (*D
 	}
 
 	var dep Deployment
-	err := d.db.WithContext(ctx).Where("prefix = ?", p).First(&dep).Error
+	// A redeploy writes the new deployment over the old one's prefix, so a
+	// prefix can carry several rows and only one of them is live. Asking for
+	// the live one first is what stops the retired row being served, which 410s
+	// a site whose replacement is sitting right there holding the manifest.
+	err := d.db.WithContext(ctx).
+		Where("prefix = ? AND status = ?", p, StatusLive).
+		Order("id DESC").
+		First(&dep).Error
+
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// Nothing live under this prefix. Fall back to the newest row of any
+		// status, so an expired or abandoned prefix still comes back as a row
+		// and the serve path can answer with the reason rather than a bare 404
+		// that reads as a mistyped address.
+		err = d.db.WithContext(ctx).
+			Where("prefix = ?", p).
+			Order("id DESC").
+			First(&dep).Error
+	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	}

@@ -1,5 +1,6 @@
 import { ApiError, readResponse } from "./api"
 import type { PickedFile } from "./drop"
+import { postPicked } from "./upload"
 
 /** The signed-in account, as /api/me reports it. */
 export type Account = {
@@ -59,16 +60,13 @@ export async function deleteSite(id: number): Promise<void> {
 /**
  * Replaces a site's contents, keeping its address.
  *
- * One part that starts with a zip header is treated as an archive, anything
- * else as the site itself, which is the same rule the backend applies.
+ * The same detection the upload page uses decides whether this goes up as an
+ * archive or as parts, and flatten is on for the same reason: a site zipped
+ * inside a wrapper directory is refused without it. The server accepts both
+ * shapes on one route, which is what keeps this to one button.
  */
-export async function redeploySite(id: number, files: PickedFile[]): Promise<void> {
-  const body = new FormData()
-  for (const { file, path } of files) {
-    body.append("file", file, path)
-  }
-
-  await readResponse(await fetch(`/api/my/sites/${id}/deploy`, { method: "POST", body }))
+export async function redeploySite(id: number, picked: PickedFile[]): Promise<void> {
+  await readResponse(await postPicked(`/api/my/sites/${id}/deploy?flatten=true`, picked))
 }
 
 export function isUnauthorized(cause: unknown): boolean {

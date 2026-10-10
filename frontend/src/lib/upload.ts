@@ -1,5 +1,5 @@
 import { readResponse } from "./api"
-import type { PickedFile } from "./drop"
+import { detectUpload, type PickedFile } from "./drop"
 import { formatBytes } from "./format"
 
 /**
@@ -77,34 +77,48 @@ export function isSinglePDF(result: UploadResult): boolean {
 }
 
 /**
- * Posts a zip archive. Exactly one part, and it must really be a zip.
+ * Builds the request body for a picked set, choosing its shape.
  *
- * Flattening is always on and deliberately not a caller choice. The server only
- * strips a directory when every entry shares one, so an archive that is already
- * correct is untouched, while an archive wrapped in `mysite/` — which is
- * otherwise rejected with a 422 and no root index.html — just works. Without it
- * that upload is refused rather than silently served at the wrong depth.
+ * A lone archive goes up as an archive, anything else as separate parts with a
+ * shared wrapper directory already removed, so the site's index lands at the
+ * root. The server applies the same rule, and would refuse a picked folder sent
+ * with the wrapper still attached for having no root index.html.
  */
-export async function uploadZip(archive: File): Promise<UploadResult> {
+async function bodyFor(picked: PickedFile[]): Promise<{ body: FormData; kind: "zip" | "files" }> {
   const body = new FormData()
-  body.append("file", archive, archive.name)
+  const detected = await detectUpload(picked)
 
-  const response = await fetch("/api/upload/zip?flatten=true", {
-    method: "POST",
-    body,
-  })
-  return readResponse<UploadResult>(response)
-}
-
-/** Posts several files, which keep the paths they were picked under. */
-export async function uploadFiles(picked: PickedFile[]): Promise<UploadResult> {
-  const body = new FormData()
-  for (const { file, path } of picked) {
+  if (detected.kind === "zip") {
+    body.append("file", detected.archive, detected.archive.name)
+    return { body, kind: "zip" }
+  }
+  for (const { file, path } of detected.files) {
     body.append("file", file, path)
   }
+  return { body, kind: "files" }
+}
 
-  const response = await fetch("/api/upload/files", { method: "POST", body })
-  return readResponse<UploadResult>(response)
+/**
+ * Posts a picked set to an endpoint that decides the shape for itself.
+ *
+ * Only the redeploy route works this way. The upload routes are separate and
+ * have to be matched to the shape, or a set of loose files arrives at the
+ * archive route and is refused for not being one.
+ *
+ * Flattening stays on and is deliberately not a caller choice. The server only
+ * strips a directory when every entry shares one, so an already-correct archive
+ * is untouched.
+ */
+export async function postPicked(path: string, picked: PickedFile[]): Promise<Response> {
+  const { body } = await bodyFor(picked)
+  return fetch(path, { method: "POST", body })
+}
+
+/** Uploads a picked set as a new site. */
+export async function uploadPicked(picked: PickedFile[]): Promise<UploadResult> {
+  const { body, kind } = await bodyFor(picked)
+  const path = kind === "zip" ? "/api/upload/zip?flatten=true" : "/api/upload/files"
+  return readResponse<UploadResult>(await fetch(path, { method: "POST", body }))
 }
 
 /** Redeems a claim token, making an unclaimed drop permanent. */

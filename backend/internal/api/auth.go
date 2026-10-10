@@ -82,7 +82,18 @@ func (h *Handler) googleSignIn(c *gin.Context) {
 		"prompt": {"select_account"},
 	}
 
-	c.Redirect(http.StatusFound, "https://accounts.google.com/o/oauth2/v2/auth?"+query.Encode())
+	c.Redirect(http.StatusFound, h.googleEndpoints().authURL+"?"+query.Encode())
+}
+
+// googleEndpoints resolves the three Google URLs once per request path, so a
+// blank in the config falls back to the real endpoint rather than to nothing.
+func (h *Handler) googleEndpoints() googleEndpoints {
+	authURL, tokenURL, userInfoURL := h.cfg.Google.Endpoints()
+	return googleEndpoints{authURL: authURL, tokenURL: tokenURL, userInfoURL: userInfoURL}
+}
+
+type googleEndpoints struct {
+	authURL, tokenURL, userInfoURL string
 }
 
 // googleCallback completes the exchange and starts a session.
@@ -175,7 +186,7 @@ func (h *Handler) exchangeCode(ctx context.Context, code string) (string, error)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://oauth2.googleapis.com/token",
+		h.googleEndpoints().tokenURL,
 		strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", fmt.Errorf("build token request: %w", err)
@@ -213,7 +224,7 @@ type googleProfile struct {
 
 func (h *Handler) fetchProfile(ctx context.Context, accessToken string) (googleProfile, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		"https://www.googleapis.com/oauth2/v3/userinfo", nil)
+		h.googleEndpoints().userInfoURL, nil)
 	if err != nil {
 		return googleProfile{}, fmt.Errorf("build profile request: %w", err)
 	}

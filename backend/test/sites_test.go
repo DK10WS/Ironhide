@@ -2,6 +2,7 @@ package test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -249,6 +250,77 @@ func TestQuotaCreditsReplacedBytes(t *testing.T) {
 	}
 	if after[0].Slug != sites[0].Slug {
 		t.Errorf("redeploy changed the slug %q -> %q", sites[0].Slug, after[0].Slug)
+	}
+}
+
+// TestRedeployKeepsServingTheSiteAfterReplacement is the regression test for a
+// bug this feature exposed: a redeploy writes the new deployment over the old
+// one's prefix, so the prefix has two rows and only the new one is live. The
+// serve path looked the prefix up without an ordering, which returned the
+// retired row, and every site answered 410 the moment it was redeployed.
+//
+// The upload, the redeploy and the read all go through the real HTTP surface, so
+// what is asserted is what a browser would get.
+func TestRedeployKeepsServingTheSiteAfterReplacement(t *testing.T) {
+	// A fresh owner per run. These tests share the development database, and a
+	// fixed name would collect sites from every earlier run, so "the" site
+	// would not be this run's and the assertions would be about stale rows.
+	owner := fmt.Sprintf("redeploy-%d", time.Now().UnixNano())
+	srv, db, token := signedInServer(t, authConfig(), owner)
+
+	status, body := uploadAs(t, srv, token, "/api/upload/files", "index.html", "<h1>first</h1>")
+	if status != http.StatusCreated {
+		t.Fatalf("upload: status %d body %s", status, body)
+	}
+
+	var sites []OwnedSiteForTest
+	listOwned(t, db, owner, &sites)
+	if len(sites) != 1 {
+		t.Fatalf("want 1 site, got %d", len(sites))
+	}
+	slug := sites[0].Slug
+
+	dataHost := slug + authConfig().DataHostSuffix
+	read := func() (int, string) {
+		resp := do(t, srv, http.MethodGet, dataHost, "/", nil)
+		out, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(out)
+	}
+
+	if code, got := read(); code != http.StatusOK || !strings.Contains(got, "first") {
+		t.Fatalf("before redeploy: status %d body %q", code, got)
+	}
+
+	// Redeploy the same site with different contents.
+	body2, ct := multipartBody(t, "index.html", "<h1>second</h1>")
+	req, err := http.NewRequest(http.MethodPost,
+		srv.URL+"/api/my/sites/"+strconv.Itoa(int(sites[0].ID))+"/deploy", strings.NewReader(string(body2)))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Host = controlHost
+	req.Header.Set("Content-Type", ct)
+	req.AddCookie(&http.Cookie{Name: "ironhide_session", Value: token})
+
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("redeploy: %v", err)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("redeploy: status %d body %s", resp.StatusCode, out)
+	}
+
+	code, got := read()
+	if code != http.StatusOK {
+		t.Fatalf("after redeploy: status %d, body %q — the site stopped serving", code, got)
+	}
+	if !strings.Contains(got, "second") {
+		t.Errorf("after redeploy: body %q, want the new content", got)
+	}
+	if strings.Contains(got, "first") {
+		t.Errorf("after redeploy: body %q still has the old content", got)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -206,10 +207,15 @@ func (h *Handler) redeployToSite(c *gin.Context) {
 
 	// The prefix of the site's current deployment is the site's address. With
 	// no deployment yet the site's slug is the whole of it.
-	prefix := "uploads/" + site.Slug + "/"
+	prefix := "uploads/" + site.Slug
 	if dep, err := h.db.GetDeploymentBySite(ctx, site.ID); err == nil && dep != nil {
 		prefix = dep.Prefix
 	}
+	// Stored prefixes are normalised, which strips the trailing separator, but
+	// object keys are built by joining the prefix and the relative path. A
+	// prefix that lost it writes every object as "uploads/<slug>index.html",
+	// and the serve path then finds no manifest entry at the root at all.
+	prefix = strings.TrimSuffix(prefix, "/") + "/"
 
 	to := target{ownerID: a.User.ID, siteID: site.ID, prefix: prefix}
 

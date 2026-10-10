@@ -76,10 +76,20 @@ func (f *fakeStore) count() int {
 func (f *fakeStore) reader(key string) io.Reader {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	// The last write for a key wins, which is what object storage does.
+	// Returning the first would make every overwrite invisible: a redeploy
+	// would appear to succeed while the site kept serving the old bytes, and
+	// no test that redeploys could ever see its result.
+	var body string
+	found := false
 	for _, p := range f.puts {
 		if p.Key == key {
-			return bytes.NewReader([]byte(p.Body))
+			body, found = p.Body, true
 		}
 	}
-	return nil
+	if !found {
+		return nil
+	}
+	return bytes.NewReader([]byte(body))
 }

@@ -6,10 +6,10 @@ import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { ApiError } from "@/lib/api"
-import { detectUpload, type PickedFile } from "@/lib/drop"
+import type { PickedFile } from "@/lib/drop"
 import { formatBytes, formatFileCount } from "@/lib/format"
 import { usePrefersReducedMotion } from "@/lib/motion"
-import { checkSize, uploadFiles, uploadZip, type UploadResult } from "@/lib/upload"
+import { checkSize, uploadPicked, type UploadResult } from "@/lib/upload"
 
 export function UploadPanel() {
   const [picked, setPicked] = useState<PickedFile[]>([])
@@ -106,20 +106,14 @@ export function UploadPanel() {
 /**
  * Sends whatever was picked.
  *
- * A lone archive goes up as an archive. Everything else goes as separate parts,
- * with a shared wrapper folder removed so the site's index lands at the root,
- * which is the same rule the server would otherwise apply.
+ * The shape is decided by what was picked, not by the caller, so this only has
+ * to guard the empty case.
  */
 async function upload(picked: PickedFile[]): Promise<UploadResult> {
   if (picked.length === 0) {
     throw new Error("Choose something to upload first.")
   }
-
-  const detected = await detectUpload(picked)
-  if (detected.kind === "zip") {
-    return uploadZip(detected.archive)
-  }
-  return uploadFiles(detected.files)
+  return uploadPicked(picked)
 }
 
 function messageFor(cause: unknown): string {

@@ -165,12 +165,22 @@ func (o Options) normalized() Options {
 	if l.MaxEntries <= 0 {
 		l.MaxEntries = d.MaxEntries
 	}
+	// The trailing separator is enforced because keys are built by joining the
+	// prefix and the relative path. A caller reading the prefix back out of the
+	// database gets it without one, and without this every key would be written
+	// as "uploads/<slug>index.html". Left empty when it arrives empty, since an
+	// empty prefix is how the caller asks for a generated one.
+	prefix := o.Prefix
+	if prefix != "" {
+		prefix = strings.TrimSuffix(prefix, "/") + "/"
+	}
+
 	return Options{
 		// Prefix is carried through. Dropping it here silently regenerated
 		// one, so a caller that had already written a deployment row for this
 		// prefix stored the objects somewhere else and the site 404d. Every
 		// field must be listed explicitly because this rebuilds the struct.
-		Prefix:           o.Prefix,
+		Prefix:           prefix,
 		Limits:           l,
 		FlattenRoot:      o.FlattenRoot,
 		RequireIndexHTML: o.RequireIndexHTML,

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react"
-import { ExternalLink, RefreshCw, Trash2 } from "lucide-react"
+import { ExternalLink, RefreshCw, Trash2, Upload } from "lucide-react"
 import { Link, createFileRoute, useLocation } from "@tanstack/react-router"
 import { useAccount } from "@/components/account-provider"
 import { CopyLink } from "@/components/copy-link"
+import { RedeployControl } from "@/components/redeploy-control"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -129,7 +130,13 @@ function SitesPage() {
       ) : (
         <ul className="flex flex-col gap-3">
           {load.sites.map((site) => (
-            <SiteRow key={site.id} site={site} busy={busy} onDelete={() => void remove(site.id)} />
+            <SiteRow
+              key={site.id}
+              site={site}
+              busy={busy}
+              onDelete={() => void remove(site.id)}
+              onChanged={() => void fetchSites()}
+            />
           ))}
         </ul>
       )}
@@ -137,10 +144,21 @@ function SitesPage() {
   )
 }
 
-function SiteRow({ site, busy, onDelete }: { site: Site; busy: boolean; onDelete: () => void }) {
+function SiteRow({
+  site,
+  busy,
+  onDelete,
+  onChanged,
+}: {
+  site: Site
+  busy: boolean
+  onDelete: () => void
+  onChanged: () => void
+}) {
   // The hostname without its scheme is what a person would recognise. The slug
   // on its own means nothing outside the database.
   const host = site.url.replace(/^https?:\/\//, "").replace(/\/$/, "")
+  const [redeploying, setRedeploying] = useState(false)
 
   return (
     <li>
@@ -171,25 +189,49 @@ function SiteRow({ site, busy, onDelete }: { site: Site; busy: boolean; onDelete
             )}
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-wrap items-center gap-2">
-          <Button asChild size="sm">
-            <a href={site.url} target="_blank" rel="noreferrer noopener">
-              Open site
-              <ExternalLink />
-            </a>
-          </Button>
-          <CopyLink value={site.url} />
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            disabled={busy}
-            onClick={onDelete}
-            className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-          >
-            <Trash2 />
-            Delete
-          </Button>
+
+        <CardContent className="flex flex-col gap-3">
+          {redeploying ? (
+            // The panel takes the row's place rather than sitting below it, so
+            // there is only ever one thing to do here and no second Redeploy
+            // button to tell apart from this one.
+            <RedeployControl
+              siteId={site.id}
+              hostname={host}
+              onCancel={() => setRedeploying(false)}
+              onDone={onChanged}
+            />
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button asChild size="sm">
+                <a href={site.url} target="_blank" rel="noreferrer noopener">
+                  Open site
+                  <ExternalLink />
+                </a>
+              </Button>
+              <CopyLink value={site.url} />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setRedeploying(true)}
+              >
+                <Upload />
+                Redeploy
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={busy}
+                onClick={onDelete}
+                className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+              >
+                <Trash2 />
+                Delete
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
     </li>

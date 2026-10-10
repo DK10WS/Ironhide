@@ -148,11 +148,46 @@ type Google struct {
 	// RedirectURI must match the one registered with Google exactly, callback
 	// path included. Google rejects the exchange otherwise.
 	RedirectURI string
+
+	// The three Google endpoints the flow talks to. They are fields rather than
+	// constants so a test can point them at a local stand-in and exercise the
+	// half of sign-in that a live Google account is otherwise the only way to
+	// reach: exchanging the code, reading the profile, and issuing the cookie.
+	// Empty means the real Google, and Load fills the defaults in.
+	AuthURL     string
+	TokenURL    string
+	UserInfoURL string
 }
 
 // AuthEnabled reports whether sign-in can work at all.
 func (g Google) AuthEnabled() bool {
 	return g.ClientID != "" && g.ClientSecret != "" && g.RedirectURI != ""
+}
+
+// Google's own endpoints, used whenever the matching field is blank.
+const (
+	defaultAuthURL     = "https://accounts.google.com/o/oauth2/v2/auth"
+	defaultTokenURL    = "https://oauth2.googleapis.com/token"
+	defaultUserInfoURL = "https://www.googleapis.com/oauth2/v3/userinfo"
+)
+
+// Endpoints returns the three URLs the flow talks to, substituting Google's
+// real ones for any left blank.
+//
+// Load fills them in, but a config built by hand — which is how tests make one —
+// would otherwise leave them empty and send requests to nothing.
+func (g Google) Endpoints() (authURL, tokenURL, userInfoURL string) {
+	authURL, tokenURL, userInfoURL = g.AuthURL, g.TokenURL, g.UserInfoURL
+	if authURL == "" {
+		authURL = defaultAuthURL
+	}
+	if tokenURL == "" {
+		tokenURL = defaultTokenURL
+	}
+	if userInfoURL == "" {
+		userInfoURL = defaultUserInfoURL
+	}
+	return authURL, tokenURL, userInfoURL
 }
 
 // Session configures the cookie carrying a signed-in session.
@@ -241,6 +276,9 @@ func Load() (Config, error) {
 			ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
 			ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
 			RedirectURI:  env("GOOGLE_REDIRECT_URI", "http://localhost:7210/api/auth/google/callback"),
+			AuthURL:      env("GOOGLE_AUTH_URL", "https://accounts.google.com/o/oauth2/v2/auth"),
+			TokenURL:     env("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token"),
+			UserInfoURL:  env("GOOGLE_USERINFO_URL", "https://www.googleapis.com/oauth2/v3/userinfo"),
 		},
 
 		Session: Session{

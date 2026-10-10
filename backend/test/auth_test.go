@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -55,7 +56,11 @@ func withCookie(t *testing.T, srv *httptest.Server, method, path, name, value st
 		t.Fatalf("new request: %v", err)
 	}
 	req.Host = controlHost
-	req.AddCookie(&http.Cookie{Name: name, Value: value})
+	// An empty name means the request carries no cookie, which is how the start
+	// of the flow is issued before there is anything to send.
+	if name != "" {
+		req.AddCookie(&http.Cookie{Name: name, Value: value})
+	}
 
 	resp, err := srv.Client().Do(req)
 	if err != nil {
@@ -140,11 +145,138 @@ func TestAuthRoutesPresentWithCredentials(t *testing.T) {
 	}
 }
 
+// TestSuccessfulSignInIssuesAUsableSession is the other half of the flow, and
+// the half a live Google account is otherwise the only way to reach.
+//
+// Everything past the consent screen — exchanging the code with the client
+// secret, reading the profile, upserting the account, and issuing the cookie
+// that /api/me then accepts — happens without a browser in front of it, so it
+// can be driven against a stand-in for Google's endpoints. Google itself is
+// still what has to say yes on a real deployment; this covers the code on this
+// side of that line.
+func TestSuccessfulSignInIssuesAUsableSession(t *testing.T) {
+	var gotTokenForm url.Values
+	var gotAuthHeader string
+
+	google := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			_ = r.ParseForm()
+			gotTokenForm = r.Form
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"at-123","token_type":"Bearer","expires_in":3600}`))
+		case "/userinfo":
+			gotAuthHeader = r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"sub":"google-123","email":"ada@example.com",` +
+				`"email_verified":true,"name":"Ada Lovelace","picture":"https://example.com/a.png"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(google.Close)
+
+	// The stand-in always reports the same account, so cleanup keys on that.
+	const email = "ada@example.com"
+
+	cfg := authConfig()
+	cfg.Google.TokenURL = google.URL + "/token"
+	cfg.Google.UserInfoURL = google.URL + "/userinfo"
+	cfg.Google.AuthURL = google.URL + "/authorize"
+
+	srv, db := newAuthServer(t, cfg)
+	t.Cleanup(func() {
+		if err := db.DB().Exec("DELETE FROM sessions WHERE user_id IN "+
+			"(SELECT id FROM users WHERE email = ?)", email).Error; err != nil {
+			t.Logf("cleanup sessions: %v", err)
+		}
+		if err := db.DB().Exec("DELETE FROM users WHERE email = ?", email).Error; err != nil {
+			t.Logf("cleanup user: %v", err)
+		}
+	})
+
+	// Start the flow and take the state from the cookie Google would get back.
+	start := withCookie(t, srv, "GET", "/api/auth/google", "", "")
+	if start.StatusCode != http.StatusFound {
+		t.Fatalf("start = %d, want a redirect", start.StatusCode)
+	}
+	var state string
+	for _, c := range start.Cookies() {
+		if c.Name == "ironhide_oauth_state" && c.HttpOnly {
+			state = c.Value
+		}
+	}
+	if state == "" {
+		t.Fatal("no HttpOnly state cookie was issued")
+	}
+
+	resp := withCookie(t, srv, "GET",
+		"/api/auth/google/callback?code=good-code&state="+url.QueryEscape(state),
+		"ironhide_oauth_state", state)
+
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("callback = %d, want a redirect home", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); strings.Contains(loc, "error=") {
+		t.Fatalf("callback redirected with an error: %s", loc)
+	}
+
+	// The exchange must carry the secret, not just the code.
+	if gotTokenForm.Get("code") != "good-code" {
+		t.Errorf("token request sent code %q", gotTokenForm.Get("code"))
+	}
+	if gotTokenForm.Get("client_secret") != cfg.Google.ClientSecret {
+		t.Error("token request did not carry the client secret")
+	}
+	if gotTokenForm.Get("grant_type") != "authorization_code" {
+		t.Errorf("grant_type = %q", gotTokenForm.Get("grant_type"))
+	}
+	if gotAuthHeader != "Bearer at-123" {
+		t.Errorf("userinfo Authorization = %q", gotAuthHeader)
+	}
+
+	// The session cookie is the whole point, so check its attributes too.
+	var session *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == "ironhide_session" {
+			session = c
+		}
+	}
+	if session == nil {
+		t.Fatal("no session cookie was issued")
+	}
+	if !session.HttpOnly {
+		t.Error("session cookie is not HttpOnly")
+	}
+	if session.Path != "/api" {
+		t.Errorf("session cookie path = %q, want /api", session.Path)
+	}
+
+	// And it must actually authenticate.
+	me := withCookie(t, srv, "GET", "/api/me", "ironhide_session", session.Value)
+	if me.StatusCode != http.StatusOK {
+		t.Fatalf("/api/me = %d, want the session to be accepted", me.StatusCode)
+	}
+	body, _ := io.ReadAll(me.Body)
+	// The profile comes from the stand-in, so these are its values.
+	if !strings.Contains(string(body), email) {
+		t.Errorf("/api/me = %s, want the email from the profile", body)
+	}
+	if !strings.Contains(string(body), "google-123") {
+		t.Errorf("/api/me = %s, want the subject as the account id", body)
+	}
+}
+
 // TestCallbackRejectsMismatchedState is the CSRF property. A callback whose
 // state does not match the cookie must not create a session, or an attacker
 // could sign a victim into an account they control.
 func TestCallbackRejectsMismatchedState(t *testing.T) {
 	srv, db := newAuthServer(t, authConfig())
+	// Counted as a delta, not as zero. These tests share the development
+	// database with everything else, and asserting an absolute zero fails as
+	// soon as anyone has signed in for real, which says nothing about this
+	// code. The property is that no session appears, not that none ever did.
+	before := countSessions(t, db)
 
 	resp := withCookie(t, srv, "GET",
 		"/api/auth/google/callback?code=abc&state=wrong", "ironhide_oauth_state", "right")
@@ -155,7 +287,7 @@ func TestCallbackRejectsMismatchedState(t *testing.T) {
 	if loc := resp.Header.Get("Location"); !strings.Contains(loc, "error=") {
 		t.Errorf("redirect %q should carry an error, not sign anyone in", loc)
 	}
-	if got := countSessions(t, db); got != 0 {
+	if got := countSessions(t, db) - before; got != 0 {
 		t.Errorf("a rejected callback created %d sessions", got)
 	}
 }
@@ -164,12 +296,13 @@ func TestCallbackRejectsMismatchedState(t *testing.T) {
 // cookie at all.
 func TestCallbackWithoutStateCookieIsRejected(t *testing.T) {
 	srv, db := newAuthServer(t, authConfig())
+	before := countSessions(t, db)
 
 	resp := do(t, srv, "GET", controlHost, "/api/auth/google/callback?code=abc&state=whatever", nil)
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("callback without a state cookie = %d, want a redirect", resp.StatusCode)
 	}
-	if got := countSessions(t, db); got != 0 {
+	if got := countSessions(t, db) - before; got != 0 {
 		t.Errorf("a callback with no state cookie created %d sessions", got)
 	}
 }
