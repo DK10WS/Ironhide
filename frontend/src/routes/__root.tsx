@@ -1,4 +1,5 @@
 import { Link, Outlet, createRootRoute } from "@tanstack/react-router"
+import { GithubMark } from "@/components/github-mark"
 import { ThemeToggle } from "@/components/theme-toggle"
 
 export const Route = createRootRoute({
@@ -23,8 +24,17 @@ function RootLayout() {
       </main>
 
       <footer className="border-t">
-        <div className="mx-auto w-full max-w-3xl px-4 py-6 text-sm text-muted-foreground sm:px-6">
-          Every upload gets its own address. Nothing here is shared with anyone else.
+        <div className="mx-auto flex w-full max-w-3xl items-center justify-between gap-4 px-4 py-6 text-sm text-muted-foreground sm:px-6">
+          <p>Every upload gets its own address. Nothing here is shared with anyone else.</p>
+          <a
+            href="https://github.com/dk10ws/ironhide"
+            target="_blank"
+            rel="noreferrer noopener"
+            aria-label="Ironhide on GitHub"
+            className="-mr-1 shrink-0 rounded-md p-2 transition-colors hover:bg-accent hover:text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+          >
+            <GithubMark className="size-5" />
+          </a>
         </div>
       </footer>
     </div>

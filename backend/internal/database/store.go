@@ -49,8 +49,13 @@ func Open(ctx context.Context, c config.Postgres) (*Database, error) {
 	if err != nil {
 		return nil, fmt.Errorf("access sql.DB: %w", err)
 	}
-	sqlDB.SetMaxOpenConns(25)
-	sqlDB.SetMaxIdleConns(5)
+	// Idle matches open so a burst does not have to re-dial. Postgres here
+	// answers a query in well under a millisecond, so an idle connection is
+	// still open by the next request; closing them costs a handshake to save
+	// nothing.
+	const maxConns = 25
+	sqlDB.SetMaxOpenConns(maxConns)
+	sqlDB.SetMaxIdleConns(maxConns)
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)

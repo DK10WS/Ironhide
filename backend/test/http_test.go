@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,8 +43,15 @@ func testConfig() config.Config {
 
 // memStore satisfies the api package's storage interface: writes for the
 // upload routes, reads for the data plane.
+// memStore records what it was given so the serve path can read it back.
+//
+// The mutex guards objects because upload.write fans its writes out with
+// errgroup, and ObjectStore is documented as safe for concurrent use. The
+// embedded fakeStore has its own lock for puts; this one covers the map that
+// GetObject reads.
 type memStore struct {
 	fakeStore
+	mu      sync.Mutex
 	objects map[string]string
 }
 
@@ -58,11 +66,17 @@ func (m *memStore) PutObject(ctx context.Context, key string, body io.Reader, si
 	}
 	b := m.fakeStore.reader(key)
 	raw, _ := io.ReadAll(b)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.objects[key] = string(raw)
 	return etag, nil
 }
 
 func (m *memStore) GetObject(_ context.Context, key string) (io.ReadCloser, int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	v, ok := m.objects[key]
 	if !ok {
 		return nil, 0, os.ErrNotExist
