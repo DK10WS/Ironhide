@@ -14,3 +14,7 @@ FROM nginxinc/nginx-unprivileged:1.31.6-alpine-slim@sha256:c81a27f28bc2d9c2da899
 EXPOSE 8080
 
 COPY --from=build /app/dist /usr/share/nginx/html
+
+# Replaces the stock default, which serves static files only and so 404s every
+# /api request and refuses bodies over 1m.
+COPY nginx.conf /etc/nginx/conf.d/default.conf

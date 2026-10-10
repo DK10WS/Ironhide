@@ -35,6 +35,15 @@ type Config struct {
 	// arriving anywhere else are not given control routes.
 	ControlHost string
 
+	// FrontendOrigin is the one origin allowed to embed a preview in an
+	// iframe, sent as the data plane's frame-ancestors.
+	//
+	// Empty means 'none', which is the safe default and what an unauthenticated
+	// deployment wants: an upload can then not be framed by anyone, so it cannot
+	// be used to overlay a convincing fake of some other page. Naming a single
+	// origin keeps that property for every site except the one serving this app.
+	FrontendOrigin string
+
 	// DataHostSuffix is the suffix previews are served under. A deployment
 	// with slug abc123 is served at abc123<DataHostSuffix>, which gives every
 	// upload its own origin so hostile content cannot reach another upload's
@@ -177,6 +186,7 @@ func Load() (Config, error) {
 		ControlHost:    env("CONTROL_HOST", "localhost:2345"),
 		DataHostSuffix: env("DATA_HOST_SUFFIX", ".preview.localhost"),
 		DataScheme:     env("DATA_SCHEME", "http"),
+		FrontendOrigin: env("FRONTEND_ORIGIN", ""),
 
 		Postgres: Postgres{
 			// The default host is the compose service name, which only

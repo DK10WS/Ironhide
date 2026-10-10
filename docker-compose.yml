@@ -39,6 +39,9 @@ services:
       GARAGE_BUCKET: ${GARAGE_DEFAULT_BUCKET}
       ADDR: :2345
       CONTROL_HOST: ${CONTROL_HOST}
+      # Lets the app embed the preview it just uploaded. Without it the data
+      # plane sends frame-ancestors 'none' and the iframe is refused.
+      FRONTEND_ORIGIN: http://localhost:7210
       PUBLIC_URL: ${PUBLIC_URL}
       DATA_HOST_SUFFIX: ${DATA_HOST_SUFFIX}
       DATA_SCHEME: ${DATA_SCHEME}

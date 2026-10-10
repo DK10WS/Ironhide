@@ -221,6 +221,60 @@ func TestDataHostSuffixIsAnchored(t *testing.T) {
 	}
 }
 
+// TestFrameAncestorsDefaultsToNone is the property that keeps an upload from
+// being laid over a convincing fake of another page. It is the default because
+// nothing needs framing until the app asks to be named.
+func TestFrameAncestorsDefaultsToNone(t *testing.T) {
+	srv, db, store := newTestServer(t)
+
+	res, err := upload.FromZip(context.Background(), store,
+		bytesReader(t, siteZip(t)), upload.DefaultOptions())
+	if err != nil {
+		t.Fatalf("FromZip: %v", err)
+	}
+	if err := record(t, db, res, time.Hour); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+
+	host := lastSegment(res.Prefix) + dataSuffix
+	got := do(t, srv, "GET", host, "/", nil).Header.Get("Content-Security-Policy")
+	if !strings.Contains(got, "frame-ancestors 'none'") {
+		t.Errorf("CSP = %q, want frame-ancestors 'none' when FrontendOrigin is unset", got)
+	}
+}
+
+// TestFrameAncestorsAllowsOnlyTheNamedOrigin checks that naming one origin
+// opens framing to that origin and no other.
+func TestFrameAncestorsAllowsOnlyTheNamedOrigin(t *testing.T) {
+	cfg := testConfig()
+	cfg.FrontendOrigin = "http://localhost:7210"
+
+	srv, db, store := newTestServerWithConfig(t, cfg)
+
+	res, err := upload.FromZip(context.Background(), store,
+		bytesReader(t, siteZip(t)), upload.DefaultOptions())
+	if err != nil {
+		t.Fatalf("FromZip: %v", err)
+	}
+	if err := record(t, db, res, time.Hour); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	host := lastSegment(res.Prefix) + dataSuffix
+
+	got := do(t, srv, "GET", host, "/", nil).Header.Get("Content-Security-Policy")
+	if !strings.Contains(got, "frame-ancestors http://localhost:7210") {
+		t.Errorf("CSP = %q, want the named origin in frame-ancestors", got)
+	}
+	// '*' would let any site frame an upload, which is the thing being traded away.
+	if strings.Contains(got, "*") {
+		t.Errorf("CSP = %q, must not allow any ancestor", got)
+	}
+	// The rest of the policy is not up for negotiation with the preview feature.
+	if !strings.Contains(got, "base-uri 'none'") || !strings.Contains(got, "form-action 'none'") {
+		t.Errorf("CSP = %q, lost base-uri or form-action", got)
+	}
+}
+
 // TestDataHostSuffixMayPinAPort is the regression for a real 404. The Host
 // header has its port cut off before the suffix is compared, so a suffix that
 // pinned one could never match and every preview resolved to nothing.

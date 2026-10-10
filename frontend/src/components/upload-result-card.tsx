@@ -1,5 +1,6 @@
 import { Link } from "@tanstack/react-router"
 import { ExternalLink, KeyRound } from "lucide-react"
+import { SitePreview } from "@/components/site-preview"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { formatBytes, formatFileCount, formatUntil } from "@/lib/format"
@@ -32,6 +33,8 @@ export function UploadResultCard({ result, onReset }: UploadResultCardProps) {
             <ExternalLink />
           </a>
         </Button>
+
+        <SitePreview src={result.preview_url} title="Uploaded site preview" />
 
         {result.expires_at !== null && (
           <section className="flex flex-col gap-3 border-t pt-6">

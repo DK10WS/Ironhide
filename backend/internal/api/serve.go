@@ -179,6 +179,20 @@ func (h *Handler) resolveKey(urlPath string, dep *database.Deployment) (string, 
 	return prefix + rel, true
 }
 
+// frameAncestors returns the frame-ancestors value for the data plane.
+//
+// Empty is the safe answer: an upload framed by nobody cannot be laid over a
+// convincing fake of some other page. Naming the app's own origin lets the
+// result card show what was just uploaded, and still leaves every other site
+// unable to frame an upload.
+func (h *Handler) frameAncestors() string {
+	origin := strings.TrimSpace(h.cfg.FrontendOrigin)
+	if origin == "" {
+		return "'none'"
+	}
+	return origin
+}
+
 // indexRel returns the deployment's index filename relative to its prefix.
 func (h *Handler) indexRel(dep *database.Deployment) string {
 	for _, e := range dep.Manifest {
@@ -221,7 +235,7 @@ func (h *Handler) writeObject(c *gin.Context, key string, size int64, body io.Re
 	// real sites. Serving them meant serving a blank page: the HTML arrived with
 	// 200 and the browser refused to run any of it.
 	c.Header("X-Content-Type-Options", "nosniff")
-	c.Header("Content-Security-Policy", "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	c.Header("Content-Security-Policy", "base-uri 'none'; form-action 'none'; frame-ancestors "+h.frameAncestors())
 	c.Header("Referrer-Policy", "no-referrer")
 	c.Header("X-Robots-Tag", "noindex, nofollow")
 
