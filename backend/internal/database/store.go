@@ -89,10 +89,10 @@ func (s *Database) Ping(ctx context.Context) error {
 }
 
 func (s *Database) Migrate() error {
-	if err := s.db.AutoMigrate(&Site{}, &Deployment{}); err != nil {
+	if err := s.db.AutoMigrate(&User{}, &Session{}, &Site{}, &Deployment{}); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
-	slog.Info("schema migrated", "tables", "sites,deployments")
+	slog.Info("schema migrated", "tables", "users,sessions,sites,deployments")
 	return nil
 }
 

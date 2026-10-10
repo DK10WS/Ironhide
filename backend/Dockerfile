@@ -14,4 +14,6 @@ FROM scratch
 
 COPY --from=builder /app/main /main
 
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
 CMD ["/main"]

@@ -50,33 +50,34 @@ export function SitePreview({ src, title }: SitePreviewProps) {
     <div className="flex flex-col gap-2">
       <span className="text-center text-sm font-medium">Preview</span>
 
-      <div
-        ref={box}
-        style={{ height: PREVIEW_HEIGHT }}
-        className="relative overflow-hidden rounded-lg border bg-muted"
-      >
-        {!loaded && (
-          <span className="absolute inset-0 grid place-content-center text-sm text-muted-foreground">
-            Loading the preview…
-          </span>
-        )}
+      <div ref={box} className="flex w-full justify-center">
+        <div
+          style={{ height: PREVIEW_HEIGHT, width: VIEWPORT_WIDTH * scale }}
+          className="relative shrink-0 overflow-hidden rounded-lg border bg-muted"
+        >
+          {!loaded && (
+            <span className="absolute inset-0 grid place-content-center text-sm text-muted-foreground">
+              Loading the preview…
+            </span>
+          )}
 
-        <iframe
-          src={src}
-          title={title}
-          loading="lazy"
-          referrerPolicy="no-referrer"
-          sandbox="allow-scripts allow-same-origin allow-popups"
-          onLoad={() => setLoaded(true)}
-          style={{
-            width: VIEWPORT_WIDTH,
-            height: Math.round(PREVIEW_HEIGHT / scale),
-            transform: `scale(${scale})`,
-            transformOrigin: "top left",
-            border: 0,
-          }}
-          className="absolute left-0 top-0 bg-white"
-        />
+          <iframe
+            src={src}
+            title={title}
+            loading="lazy"
+            referrerPolicy="no-referrer"
+            sandbox="allow-scripts allow-same-origin allow-popups"
+            onLoad={() => setLoaded(true)}
+            style={{
+              width: VIEWPORT_WIDTH,
+              height: Math.round(PREVIEW_HEIGHT / scale),
+              transform: `scale(${scale})`,
+              transformOrigin: "top left",
+              border: 0,
+            }}
+            className="absolute left-0 top-0 bg-white"
+          />
+        </div>
       </div>
 
       <p className="text-xs text-muted-foreground">

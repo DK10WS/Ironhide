@@ -10,11 +10,17 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as SitesRouteImport } from './routes/sites'
 import { Route as ClaimTokenRouteImport } from './routes/claim.$token'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SitesRoute = SitesRouteImport.update({
+  id: '/sites',
+  path: '/sites',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ClaimTokenRoute = ClaimTokenRouteImport.update({
@@ -25,27 +31,31 @@ const ClaimTokenRoute = ClaimTokenRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/sites': typeof SitesRoute
   '/claim/$token': typeof ClaimTokenRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/sites': typeof SitesRoute
   '/claim/$token': typeof ClaimTokenRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/sites': typeof SitesRoute
   '/claim/$token': typeof ClaimTokenRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/claim/$token'
+  fullPaths: '/' | '/sites' | '/claim/$token'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/claim/$token'
-  id: '__root__' | '/' | '/claim/$token'
+  to: '/' | '/sites' | '/claim/$token'
+  id: '__root__' | '/' | '/sites' | '/claim/$token'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  SitesRoute: typeof SitesRoute
   ClaimTokenRoute: typeof ClaimTokenRoute
 }
 
@@ -56,6 +66,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sites': {
+      id: '/sites'
+      path: '/sites'
+      fullPath: '/sites'
+      preLoaderRoute: typeof SitesRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/claim/$token': {
@@ -70,6 +87,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  SitesRoute: SitesRoute,
   ClaimTokenRoute: ClaimTokenRoute,
 }
 export const routeTree = rootRouteImport

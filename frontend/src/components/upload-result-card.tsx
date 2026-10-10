@@ -12,7 +12,8 @@ type UploadResultCardProps = {
 }
 
 export function UploadResultCard({ result, onReset }: UploadResultCardProps) {
-  const token = claimTokenFrom(result.claim_url)
+  // Absent for an owned upload, which needs no claim link.
+  const token = result.claim_url === undefined ? null : claimTokenFrom(result.claim_url)
 
   return (
     <Card>
@@ -36,26 +37,38 @@ export function UploadResultCard({ result, onReset }: UploadResultCardProps) {
 
         <SitePreview src={result.preview_url} title="Uploaded site preview" />
 
-        {result.expires_at !== null && (
+        {result.owned === true ? (
           <section className="flex flex-col gap-3 border-t pt-6">
-            <h2 className="text-sm font-medium">Keep it</h2>
+            <h2 className="text-sm font-medium">It is yours</h2>
             <p className="text-sm text-muted-foreground">
-              Until then this is a temporary drop. The link below makes it permanent, once, for
-              whoever holds it.
+              This one is in your account and does not expire.
             </p>
-            {token === null ? (
-              <p role="alert" className="text-sm text-destructive">
-                That claim link came back malformed, so it cannot be used from here.
-              </p>
-            ) : (
-              <Button asChild variant="outline" className="w-fit">
-                <Link to="/claim/$token" params={{ token }}>
-                  <KeyRound />
-                  Keep this site
-                </Link>
-              </Button>
-            )}
+            <Button asChild variant="outline" className="w-fit">
+              <Link to="/sites">Manage your sites</Link>
+            </Button>
           </section>
+        ) : (
+          result.expires_at !== null && (
+            <section className="flex flex-col gap-3 border-t pt-6">
+              <h2 className="text-sm font-medium">Keep it</h2>
+              <p className="text-sm text-muted-foreground">
+                Until then this is a temporary drop. The link below makes it permanent, once, for
+                whoever holds it.
+              </p>
+              {token === null ? (
+                <p role="alert" className="text-sm text-destructive">
+                  That claim link came back malformed, so it cannot be used from here.
+                </p>
+              ) : (
+                <Button asChild variant="outline" className="w-fit">
+                  <Link to="/claim/$token" params={{ token }}>
+                    <KeyRound />
+                    Keep this site
+                  </Link>
+                </Button>
+              )}
+            </section>
+          )
         )}
 
         <div className="border-t pt-6">

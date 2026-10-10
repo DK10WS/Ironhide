@@ -30,6 +30,47 @@ const (
 	StatusDeleted = "deleted"
 )
 
+// User is an account, identified by Google's stable per-client subject id.
+//
+// The subject is the primary key rather than a surrogate: it is already unique,
+// already stable across renames, and it is what Site.OwnerID and
+// Deployment.OwnerID already hold. Using it avoids a mapping table whose only
+// job would be to renumber a string.
+type User struct {
+	// ID is Google's "sub" claim for this client.
+	ID string `gorm:"size:64;primaryKey"`
+
+	Email string `gorm:"size:254;index"`
+
+	// EmailVerified comes from Google. An unverified address is recorded but
+	// never treated as a reason to trust anything beyond sign-in.
+	EmailVerified bool `gorm:"not null;default:false"`
+
+	Name    string `gorm:"size:128"`
+	Picture string `gorm:"size:512"`
+
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// Session is one signed-in browser.
+//
+// Only the token's hash is stored, so a copy of the table does not hand out
+// working cookies. The plaintext exists in the cookie and nowhere else.
+type Session struct {
+	// ID is a separate random value from the token, so the row's identity is
+	// never the credential itself. 32 hex chars is plenty and fits the column.
+	ID string `gorm:"size:32;primaryKey"`
+
+	UserID string `gorm:"size:64;index;not null"`
+
+	// TokenHash is SHA-256 of the cookie value.
+	TokenHash string `gorm:"size:64;uniqueIndex;not null"`
+
+	ExpiresAt time.Time `gorm:"index;not null"`
+	CreatedAt time.Time
+}
+
 type Site struct {
 	ID   uint   `gorm:"primaryKey"`
 	Slug string `gorm:"size:63;uniqueIndex;not null"`
@@ -70,6 +111,13 @@ type Deployment struct {
 	ExpiresAt *time.Time `gorm:"index"`
 	ClaimedAt *time.Time `gorm:"index"`
 	ClaimedBy string     `gorm:"size:64"`
+
+	// OwnerID scopes this drop to an account. Empty means an anonymous drop,
+	// which is the pre-existing behaviour and stays supported.
+	//
+	// It is Google's stable subject id rather than a row id, matching
+	// Site.OwnerID, so the same string names the account everywhere.
+	OwnerID string `gorm:"size:64;index"`
 
 	CreatedAt time.Time
 	UpdatedAt time.Time

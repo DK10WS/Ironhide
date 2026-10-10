@@ -92,7 +92,7 @@ export async function zipPicked(picked: PickedFile[]): Promise<File> {
 
   for (const { file, path } of picked) {
     const name = encoder.encode(path)
-    const data = new Uint8Array(await readBytes(file))
+    const data = new Uint8Array(await file.arrayBuffer())
     const crc = crc32(data, table)
 
     const header = new Uint8Array(30 + name.length)
@@ -136,8 +136,49 @@ export async function zipPicked(picked: PickedFile[]): Promise<File> {
   })
 }
 
-function readBytes(file: File): Promise<ArrayBuffer> {
-  return file.arrayBuffer()
+/** What was picked, decided from the contents rather than asked about. */
+export type Detected = { kind: "zip"; archive: File } | { kind: "files"; files: PickedFile[] }
+
+/**
+ * Works out how to send a set of picked files.
+ *
+ * A lone archive goes up as itself. Anything else goes as separate parts, with
+ * a shared wrapper directory removed first, because the server rejects an
+ * upload whose root has no index.html.
+ *
+ * The stripping rule mirrors the server's own detectSingleRoot: a directory is
+ * only removed when every file sits inside the same one. Applying it more
+ * eagerly would flatten a site that legitimately has folders at its root.
+ */
+export async function detectUpload(picked: PickedFile[]): Promise<Detected> {
+  const only = picked[0]
+  if (picked.length === 1 && only !== undefined && (await isZip(only.file))) {
+    return { kind: "zip", archive: only.file }
+  }
+  return { kind: "files", files: stripSharedRoot(picked) }
+}
+
+/** Reads the local file header every zip starts with. */
+async function isZip(file: File): Promise<boolean> {
+  const head = new Uint8Array(await file.slice(0, 4).arrayBuffer())
+  return (
+    head.length === 4 &&
+    head[0] === 0x50 &&
+    head[1] === 0x4b &&
+    head[2] === 0x03 &&
+    head[3] === 0x04
+  )
+}
+
+function stripSharedRoot(picked: PickedFile[]): PickedFile[] {
+  const roots = new Set(picked.map(({ path }) => path.split("/")[0] ?? ""))
+  if (roots.size !== 1) return picked
+
+  const [root] = [...roots]
+  // A loose file has no directory to strip, so leave the whole set alone.
+  if (picked.some(({ path }) => path.split("/").length < 2)) return picked
+
+  return picked.map(({ file, path }) => ({ file, path: path.slice(root!.length + 1) }))
 }
 
 function crcTable(): Uint32Array {

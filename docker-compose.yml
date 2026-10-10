@@ -51,6 +51,12 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_SSLMODE: disable
+      # Sign-in. Without these the auth routes are not registered at all.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI}
+      SESSION_COOKIE_SECURE: "false"
+      QUOTA_BYTES_PER_USER: ${QUOTA_BYTES_PER_USER:-1073741824}
     ports:
       - "2345:2345"
     restart: unless-stopped
@@ -75,6 +81,9 @@ services:
 
   frontend:
     build: frontend/
+    depends_on:
+      backend:
+        condition: service_started
     ports:
       - "7210:8080"
 

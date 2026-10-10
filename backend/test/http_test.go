@@ -73,6 +73,13 @@ func (m *memStore) PutObject(ctx context.Context, key string, body io.Reader, si
 	return etag, nil
 }
 
+func (m *memStore) DeleteKey(_ context.Context, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.objects, key)
+	return nil
+}
+
 func (m *memStore) GetObject(_ context.Context, key string) (io.ReadCloser, int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

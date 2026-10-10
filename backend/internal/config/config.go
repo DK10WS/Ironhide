@@ -44,6 +44,15 @@ type Config struct {
 	// origin keeps that property for every site except the one serving this app.
 	FrontendOrigin string
 
+	// Google holds the OAuth client used to sign people in.
+	Google Google
+
+	// Session configures the cookie that carries a signed-in session.
+	Session Session
+
+	// Quota caps how much a single account may store.
+	Quota Quota
+
 	// DataHostSuffix is the suffix previews are served under. A deployment
 	// with slug abc123 is served at abc123<DataHostSuffix>, which gives every
 	// upload its own origin so hostile content cannot reach another upload's
@@ -128,6 +137,46 @@ func (u Upload) Limits() upload.Limits {
 	}
 }
 
+// Google holds the OAuth client credentials for sign-in.
+//
+// Empty ClientID disables the sign-in routes, which is what an unauthenticated
+// deployment wants: they are not registered rather than registered and broken.
+type Google struct {
+	ClientID     string
+	ClientSecret string
+
+	// RedirectURI must match the one registered with Google exactly, callback
+	// path included. Google rejects the exchange otherwise.
+	RedirectURI string
+}
+
+// AuthEnabled reports whether sign-in can work at all.
+func (g Google) AuthEnabled() bool {
+	return g.ClientID != "" && g.ClientSecret != "" && g.RedirectURI != ""
+}
+
+// Session configures the cookie carrying a signed-in session.
+//
+// The cookie holds a random token whose hash is the only thing stored, so a
+// database dump does not hand out live sessions. Lifetime is short enough that
+// a stolen cookie expires on its own.
+type Session struct {
+	// Lifetime is how long a session stays valid.
+	Lifetime time.Duration
+
+	// Secure marks the cookie Secure. It should be false only for local http,
+	// where a Secure cookie is silently dropped and sign-in appears broken.
+	Secure bool
+}
+
+// Quota caps what one account may store.
+type Quota struct {
+	// BytesPerUser is the total of the current live deployments owned by one
+	// account. A redeploy replaces the files it supersedes, so an old
+	// deployment's size stops counting once its objects are gone.
+	BytesPerUser int64
+}
+
 // Postgres identifies the metadata database.
 type Postgres struct {
 	Host     string
@@ -187,6 +236,21 @@ func Load() (Config, error) {
 		DataHostSuffix: env("DATA_HOST_SUFFIX", ".preview.localhost"),
 		DataScheme:     env("DATA_SCHEME", "http"),
 		FrontendOrigin: env("FRONTEND_ORIGIN", ""),
+
+		Google: Google{
+			ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
+			ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
+			RedirectURI:  env("GOOGLE_REDIRECT_URI", "http://localhost:7210/api/auth/google/callback"),
+		},
+
+		Session: Session{
+			Lifetime: time.Duration(envInt64("SESSION_LIFETIME_SECONDS", 30*24*3600)) * time.Second,
+			Secure:   env("SESSION_COOKIE_SECURE", "false") == "true",
+		},
+
+		Quota: Quota{
+			BytesPerUser: envInt64("QUOTA_BYTES_PER_USER", 1<<30),
+		},
 
 		Postgres: Postgres{
 			// The default host is the compose service name, which only

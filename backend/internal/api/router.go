@@ -36,6 +36,11 @@ import (
 type objectStore interface {
 	upload.ObjectStore
 	GetObject(ctx context.Context, key string) (io.ReadCloser, int64, error)
+
+	// DeleteKey removes a single object. A redeploy uses it to clear files the
+	// new manifest dropped, which would otherwise stay in the bucket and keep
+	// counting against the owner's quota.
+	DeleteKey(ctx context.Context, key string) error
 }
 
 // Handler holds the dependencies shared by every route.
@@ -60,12 +65,24 @@ func NewRouter(cfg config.Config, store objectStore, db *database.Database) *gin
 
 		uploads := control.Group("/upload")
 		{
-			uploads.POST("/zip", h.uploadZip)
-			uploads.POST("/file", h.uploadFile)
-			uploads.POST("/files", h.uploadFiles)
+			// optionalAccount makes a signed-in upload an owned site without
+			// requiring one: with no session it stays a temporary drop with a
+			// claim link, which is the behaviour that existed before accounts
+			// and is still the only option for an anonymous caller.
+			uploads.POST("/zip", h.optionalAccount, h.ownedUploadZip)
+			uploads.POST("/file", h.optionalAccount, h.uploadFile)
+			uploads.POST("/files", h.optionalAccount, h.ownedUploadFiles)
 		}
 
 		control.POST("/claim/:token", h.claim)
+
+		// Not registered when Google credentials are absent, so an
+		// unauthenticated deployment offers no half-working sign-in and no
+		// endpoints that can only ever answer 401.
+		if h.authEnabled() {
+			h.registerAuth(control)
+			h.registerSites(control)
+		}
 	}
 
 	r.NoRoute(h.serve)

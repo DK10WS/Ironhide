@@ -134,6 +134,8 @@ func (d *Database) CreateDeployment(ctx context.Context, in CreateDeploymentInpu
 		Bytes:          manifestTotal(in.Files),
 		Manifest:       Manifest(in.Files),
 		ClaimTokenHash: HashClaimToken(token),
+		OwnerID:        in.OwnerID,
+		ClaimedBy:      in.ClaimedBy,
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}

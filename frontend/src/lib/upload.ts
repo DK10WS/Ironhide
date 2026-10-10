@@ -12,8 +12,16 @@ export type UploadResult = {
   id: number
   /** Where the site is served from, on the data plane. */
   preview_url: string
-  /** The single-use link that makes the drop permanent. */
-  claim_url: string
+  /**
+   * The single-use link that makes the drop permanent.
+   *
+   * Absent when the upload was made while signed in: such a site is already
+   * owned and permanent, so there is nothing to redeem and no credential worth
+   * putting in a response.
+   */
+  claim_url?: string
+  /** True when the upload was attached to a signed-in account. */
+  owned?: boolean
   /** RFC 3339 deadline, or null when the drop never expires. */
   expires_at: string | null
   bytes: number

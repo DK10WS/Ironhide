@@ -7,6 +7,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -35,6 +37,10 @@ var zipMagic = []byte{'P', 'K', 0x03, 0x04}
 const maxParts = 8192
 
 func (h *Handler) uploadZip(c *gin.Context) {
+	h.uploadZipTo(c, target{})
+}
+
+func (h *Handler) uploadZipTo(c *gin.Context, to target) {
 	parts, err := readParts(c, h.cfg.Upload.MaxBytes)
 	if err != nil {
 		h.fail(c, err)
@@ -64,13 +70,20 @@ func (h *Handler) uploadZip(c *gin.Context) {
 		return
 	}
 
+	// Checked before anything is stored. The archive is compressed, so this
+	// bounds the request rather than the result; the real total is re-checked
+	// against the quota once the manifest is known, before the row goes live.
+	if to.owned() && !h.withinQuota(c, to, int64(len(raw))) {
+		return
+	}
+
 	opts := upload.Options{
 		Limits:           h.cfg.Upload.Limits(),
 		FlattenRoot:      c.Query("flatten") == "true",
 		RequireIndexHTML: true,
 	}
 
-	h.storeUpload(c, func(prefix string) (upload.Result, error) {
+	h.storeUpload(c, to, func(prefix string) (upload.Result, error) {
 		opts.Prefix = prefix
 		return upload.FromZip(c.Request.Context(), h.store, bytes.NewReader(raw), opts)
 	})
@@ -87,7 +100,11 @@ func (h *Handler) uploadFile(c *gin.Context) {
 		return
 	}
 
-	h.storeUpload(c, func(prefix string) (upload.Result, error) {
+	if !h.withinQuota(c, target{}, int64(len(parts[0].data))) {
+		return
+	}
+
+	h.storeUpload(c, target{}, func(prefix string) (upload.Result, error) {
 		return upload.FromSingleFile(c.Request.Context(), h.store,
 			parts[0].name, bytes.NewReader(parts[0].data), int64(len(parts[0].data)), upload.Options{
 				Limits:           h.cfg.Upload.Limits(),
@@ -98,6 +115,10 @@ func (h *Handler) uploadFile(c *gin.Context) {
 }
 
 func (h *Handler) uploadFiles(c *gin.Context) {
+	h.uploadFilesTo(c, target{})
+}
+
+func (h *Handler) uploadFilesTo(c *gin.Context, to target) {
 	parts, err := readParts(c, h.cfg.Upload.MaxBytes)
 	if err != nil {
 		h.fail(c, err)
@@ -109,15 +130,22 @@ func (h *Handler) uploadFiles(c *gin.Context) {
 	}
 
 	files := make([]upload.IncomingFile, 0, len(parts))
+	var total int64
 	for _, p := range parts {
 		files = append(files, upload.IncomingFile{
 			Name: p.name,
 			Data: p.data,
 			Size: int64(len(p.data)),
 		})
+		total += int64(len(p.data))
 	}
 
-	h.storeUpload(c, func(prefix string) (upload.Result, error) {
+	// Uncompressed, so this is the figure the quota is actually measured in.
+	if to.owned() && !h.withinQuota(c, to, total) {
+		return
+	}
+
+	h.storeUpload(c, to, func(prefix string) (upload.Result, error) {
 		return upload.FromFiles(c.Request.Context(), h.store, files, upload.Options{
 			Limits:           h.cfg.Upload.Limits(),
 			RequireIndexHTML: true,
@@ -234,16 +262,68 @@ func parseErr(err error) error {
 // partial objects — and that direction is the cheap one to clean up, because
 // Postgres can find it with an indexed query while orphaned objects would
 // require listing every key in the bucket.
-func (h *Handler) storeUpload(c *gin.Context, store func(prefix string) (upload.Result, error)) {
-	// The prefix is generated here rather than inside upload so the row can
-	// carry it. It is still server-generated: nothing about it comes from the
-	// request, which is what keeps one upload from addressing another.
-	prefix := upload.NewPrefix()
+// target says who an upload is for. The zero value is the pre-existing
+// behaviour: an anonymous temporary drop that expires and is kept alive by a
+// claim link.
+type target struct {
+	// ownerID is Google's subject id. Empty means anonymous.
+	ownerID string
 
-	created, err := h.db.CreateDeployment(c.Request.Context(), database.CreateDeploymentInput{
-		Prefix: prefix,
-		TTL:    h.cfg.Upload.TTL,
-	})
+	// siteID is the site being deployed to. Zero means this upload creates a
+	// new site rather than replacing one.
+	siteID uint
+
+	// prefix reuses an existing prefix on a redeploy, which is what keeps the
+	// address stable. Empty means mint a fresh one.
+	prefix string
+}
+
+// owned reports whether this upload belongs to an account.
+func (t target) owned() bool { return t.ownerID != "" }
+
+// storeUpload runs the three-step write for every upload shape.
+//
+// The order is the point:
+//
+//  1. create a deployment row, still pending, carrying the object prefix
+//  2. write the objects under that prefix
+//  3. promote the row to live
+//
+// Because the row is written first, bytes can never exist without a row
+// describing them. The failure mode is the reverse — a pending row with no or
+// partial objects — and that direction is the cheap one to clean up, because
+// Postgres can find it with an indexed query while orphaned objects would
+// require listing every key in the bucket.
+func (h *Handler) storeUpload(c *gin.Context, to target, store func(prefix string) (upload.Result, error)) {
+	ctx := c.Request.Context()
+
+	// A redeploy writes over the site's existing prefix so its address does
+	// not change. Otherwise a fresh one is minted here rather than inside
+	// upload so the row can carry it. It is still server-generated: nothing
+	// about it comes from the request, which is what keeps one upload from
+	// addressing another.
+	prefix := to.prefix
+	if prefix == "" {
+		prefix = upload.NewPrefix()
+	}
+
+	input := database.CreateDeploymentInput{Prefix: prefix}
+
+	if to.owned() {
+		// An owned deployment is not a drop: it has no claim window, because
+		// there is nothing to claim and nothing to expire.
+		//
+		// ClaimedBy is deliberately left empty here. Setting it would make
+		// CreateDeployment write the row live immediately, and RecordUpload
+		// below exists to promote a pending row once the objects are really
+		// there. The ownership is recorded by attachOwned, after the write.
+		input.OwnerID = to.ownerID
+		input.TTL = 0
+	} else {
+		input.TTL = h.cfg.Upload.TTL
+	}
+
+	created, err := h.db.CreateDeployment(ctx, input)
 	if err != nil {
 		h.fail(c, err)
 		return
@@ -257,7 +337,7 @@ func (h *Handler) storeUpload(c *gin.Context, store func(prefix string) (upload.
 		return
 	}
 
-	if err := h.db.RecordUpload(c.Request.Context(), created.Deployment.ID, res); err != nil {
+	if err := h.db.RecordUpload(ctx, created.Deployment.ID, res); err != nil {
 		// The objects are stored but the manifest could not be written, so
 		// the row cannot describe them. Fail it rather than serving a site
 		// whose recorded contents disagree with the bucket.
@@ -265,21 +345,65 @@ func (h *Handler) storeUpload(c *gin.Context, store func(prefix string) (upload.
 		return
 	}
 
+	slug := created.Deployment.Slug()
+
+	if to.owned() {
+		if err := h.attachOwned(ctx, to, created.Deployment.ID, slug, res); err != nil {
+			// The objects exist but nothing ties them to the account, so the
+			// row has to go rather than leave bytes nobody can find.
+			h.abandonUpload(c, created.Deployment.ID, res, err)
+			return
+		}
+	}
+
 	slog.Info("upload accepted",
 		"id", created.Deployment.ID,
 		"prefix", created.Deployment.Prefix,
 		"files", len(res.Files),
 		"bytes", res.Bytes,
+		"owned", to.owned(),
 	)
 
-	c.JSON(http.StatusCreated, gin.H{
+	body := gin.H{
 		"id":          created.Deployment.ID,
-		"preview_url": h.previewURL(created.Deployment.Slug()),
-		"claim_url":   h.claimURL(created.ClaimToken),
+		"preview_url": h.previewURL(slug),
 		"expires_at":  expiresAt(created.Deployment),
 		"bytes":       res.Bytes,
 		"files":       res.Files,
-	})
+	}
+
+	if to.owned() {
+		// No claim link: the site is already permanent and owned, so there is
+		// nothing to redeem and no credential worth putting in a response.
+		body["owned"] = true
+	} else {
+		body["claim_url"] = h.claimURL(created.ClaimToken)
+	}
+
+	c.JSON(http.StatusCreated, body)
+}
+
+// attachOwned ties a finished upload to a site in the owner's account.
+//
+// A new site takes its name from the deployment's slug, which is the label the
+// address is built from. A redeploy keeps the existing row so the address is
+// unchanged, and retires the deployment it supersedes so the old bytes stop
+// counting against the quota in the same transaction.
+func (h *Handler) attachOwned(ctx context.Context, to target, deploymentID uint, slug string, res upload.Result) error {
+	if to.siteID != 0 {
+		if err := h.db.AttachSiteToDeployment(ctx, deploymentID, to.siteID, to.ownerID); err != nil {
+			return err
+		}
+		// A redeploy wrote over the old prefix, so anything the new manifest no
+		// longer lists is now unreachable and still counted against the quota.
+		return h.deleteStaleKeys(ctx, to.siteID, res.Files)
+	}
+
+	site, err := h.db.UpsertSite(ctx, slug, strings.TrimPrefix(h.previewURL(slug), h.cfg.DataScheme+"://"), to.ownerID)
+	if err != nil {
+		return err
+	}
+	return h.db.AttachSiteToDeployment(ctx, deploymentID, site.ID, to.ownerID)
 }
 
 // abandonUpload deals with the row for an upload that did not finish.

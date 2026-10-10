@@ -5,26 +5,31 @@ import { Button } from "@/components/ui/button"
 import { pickFromDrop, pickFromInput } from "@/lib/drop"
 
 type DropzoneProps = {
-  /** When set, the file picker opens on a directory instead of on files. */
-  directory: boolean
   busy: boolean
   onPick: (files: ReturnType<typeof pickFromInput>) => void
 }
 
-export function Dropzone({ directory, busy, onPick }: DropzoneProps) {
+/**
+ * The one place a site goes in.
+ *
+ * A folder button sits next to the files one because the operating system offers
+ * two different dialogs for them. Beyond that there is nothing to choose: what
+ * arrived decides how it is sent.
+ */
+export function Dropzone({ busy, onPick }: DropzoneProps) {
   const input = useRef<HTMLInputElement | null>(null)
+  const folderInput = useRef<HTMLInputElement | null>(null)
   const [over, setOver] = useState(false)
 
-  // React does not know the attribute, and toggling it per render would reset
-  // the element on every mode change.
-  function attach(node: HTMLInputElement | null) {
+  // React does not know the attribute, and setting it on every render would
+  // reset the element each time the state changes.
+  function attachFiles(node: HTMLInputElement | null) {
     input.current = node
-    if (node === null) return
-    if (directory) {
-      node.setAttribute("webkitdirectory", "")
-    } else {
-      node.removeAttribute("webkitdirectory")
-    }
+  }
+
+  function attachFolder(node: HTMLInputElement | null) {
+    folderInput.current = node
+    if (node !== null) node.setAttribute("webkitdirectory", "")
   }
 
   async function onDrop(event: React.DragEvent<HTMLDivElement>) {
@@ -54,33 +59,53 @@ export function Dropzone({ directory, busy, onPick }: DropzoneProps) {
       onDragLeave={() => setOver(false)}
       onDrop={onDrop}
       className={cn(
-        "flex flex-col items-center gap-4 rounded-xl border border-dashed px-6 py-10 text-center transition-colors sm:py-14",
-        over ? "border-primary bg-accent" : "border-border bg-muted/30",
+        "group relative flex flex-col items-center gap-5 rounded-2xl border border-dashed border-input px-6 py-16 text-center transition-colors sm:py-24",
+        over ? "bg-accent" : "hover:bg-muted/40",
         busy && "pointer-events-none opacity-60",
       )}
     >
-      <Upload className="size-6 text-muted-foreground" aria-hidden />
-      <p className="text-sm text-muted-foreground">
-        Drop {directory ? "a project folder" : "files"} here
-      </p>
-      <Button
-        type="button"
-        variant="outline"
-        disabled={busy}
-        onClick={() => input.current?.click()}
+      <span
+        aria-hidden
+        className={cn(
+          "grid size-14 place-items-center rounded-full bg-accent transition-transform",
+          over ? "scale-110" : "group-hover:scale-105",
+        )}
       >
-        <FolderOpen />
-        {directory ? "Choose a folder" : "Choose files"}
-      </Button>
+        <Upload className="size-6" />
+      </span>
 
-      <input
-        ref={attach}
-        type="file"
-        multiple
-        onChange={onChange}
-        className="hidden"
-        aria-label={directory ? "Choose a project folder" : "Choose files"}
-      />
+      <div className="flex flex-col gap-2">
+        <p className="text-lg font-semibold tracking-[-0.01em]">Drop a site here</p>
+        <p className="mx-auto max-w-sm text-muted-foreground">
+          A zip, a project folder, or loose files with an{" "}
+          <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-sm">index.html</code> at
+          the root.
+        </p>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          disabled={busy}
+          onClick={() => input.current?.click()}
+        >
+          <Upload />
+          Choose files
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={busy}
+          onClick={() => folderInput.current?.click()}
+        >
+          <FolderOpen />
+          Choose a folder
+        </Button>
+      </div>
+
+      <input ref={attachFiles} type="file" multiple onChange={onChange} className="hidden" />
+      <input ref={attachFolder} type="file" onChange={onChange} className="hidden" />
     </div>
   )
 }

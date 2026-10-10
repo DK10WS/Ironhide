@@ -94,6 +94,25 @@ func (s *Store) ListPrefix(ctx context.Context, prefix string, limit int32) ([]u
 
 var _ upload.ObjectStore = (*Store)(nil)
 
+// DeleteKey removes one object.
+//
+// Deleting a key that is already gone is not an error, matching DeletePrefix: a
+// redeploy may race the sweeper, and the object being absent is the outcome it
+// wanted either way.
+func (s *Store) DeleteKey(ctx context.Context, key string) error {
+	if err := safepath.ValidateKey(key); err != nil {
+		return fmt.Errorf("reject key: %w", err)
+	}
+	_, err := s.s3.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return fmt.Errorf("delete %s: %w", key, err)
+	}
+	return nil
+}
+
 // maxDeleteBatch is the S3 limit on keys in one DeleteObjects request.
 const maxDeleteBatch = 1000
 
