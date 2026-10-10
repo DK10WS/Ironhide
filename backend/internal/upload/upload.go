@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"strings"
 
 	"golang.org/x/sync/errgroup"
@@ -100,9 +101,9 @@ type Limits struct {
 
 func DefaultLimits() Limits {
 	return Limits{
-		MaxArchiveBytes: 128 << 20, // 128 MiB compressed
-		MaxFileBytes:    32 << 20,  // 32 MiB per file
-		MaxTotalBytes:   256 << 20, // 256 MiB uncompressed
+		MaxArchiveBytes: 50 << 20, // 50 MiB compressed
+		MaxFileBytes:    50 << 20, // 50 MiB per file
+		MaxTotalBytes:   50 << 20, // 50 MiB uncompressed across one request
 		MaxEntries:      4096,
 	}
 }
@@ -133,6 +134,16 @@ type Options struct {
 	// afterwards would leave objects in the bucket with no deployment row
 	// pointing at them, which nothing would ever find or clean up.
 	RequireIndexHTML bool
+
+	// AllowSinglePDF accepts an upload that is exactly one PDF at the root and
+	// nothing else, which has no index.html to be found. The PDF is then served
+	// at the site root, so a document gets an address of its own.
+	//
+	// Deliberately narrow. It requires the whole upload to be that one file, so
+	// a folder of PDFs or a site that merely links to one still needs an index,
+	// and there is no case where adding files to a lone PDF silently changes
+	// what the root serves.
+	AllowSinglePDF bool
 }
 
 func DefaultOptions() Options {
@@ -163,6 +174,7 @@ func (o Options) normalized() Options {
 		Limits:           l,
 		FlattenRoot:      o.FlattenRoot,
 		RequireIndexHTML: o.RequireIndexHTML,
+		AllowSinglePDF:   o.AllowSinglePDF,
 	}
 }
 
@@ -343,11 +355,35 @@ func plan(zr *zip.Reader, opts Options) ([]planned, string, error) {
 		files = append(files, planned{rel: rel, data: data})
 	}
 
-	if opts.RequireIndexHTML && !hasIndexHTML(files) {
+	if opts.RequireIndexHTML && !hasRootDocument(files, opts.AllowSinglePDF) {
 		return nil, "", missingIndexError(files, rootDir)
 	}
 
 	return files, rootDir, nil
+}
+
+// hasRootDocument reports whether an upload has something the site root can
+// serve: an index, or, when allowed, a single PDF standing in for one.
+func hasRootDocument(files []planned, allowSinglePDF bool) bool {
+	if hasIndexHTML(files) {
+		return true
+	}
+	return allowSinglePDF && isLonePDF(files)
+}
+
+// isLonePDF reports whether the upload is exactly one PDF at the root.
+//
+// Nested paths do not count: `docs/report.pdf` is a file inside a site, not a
+// document being served as the site.
+func isLonePDF(files []planned) bool {
+	if len(files) != 1 {
+		return false
+	}
+	rel := files[0].rel
+	if strings.Contains(rel, "/") {
+		return false
+	}
+	return strings.EqualFold(path.Ext(rel), ".pdf")
 }
 
 // hasIndexHTML reports whether any planned file is an index at the prefix
@@ -405,7 +441,9 @@ func missingIndexError(files []planned, rootDir string) error {
 		}
 		names = append(names, f.rel)
 	}
-	return fmt.Errorf("%w: found %s", ErrNoIndexHTML, strings.Join(names, ", "))
+	return fmt.Errorf(
+		"%w: found %s. A site needs an index.html, or a single PDF on its own",
+		ErrNoIndexHTML, strings.Join(names, ", "))
 }
 
 // readEntry extracts one entry with a hard byte cap.
@@ -594,7 +632,7 @@ func planFiles(files []IncomingFile, opts Options) ([]planned, error) {
 		out = append(out, planned{rel: rel, data: data})
 	}
 
-	if opts.RequireIndexHTML && !hasIndexHTML(out) {
+	if opts.RequireIndexHTML && !hasRootDocument(out, opts.AllowSinglePDF) {
 		return nil, missingIndexError(out, "")
 	}
 

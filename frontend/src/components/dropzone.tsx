@@ -3,6 +3,8 @@ import { useRef, useState } from "react"
 import { cn } from "cn"
 import { Button } from "@/components/ui/button"
 import { pickFromDrop, pickFromInput } from "@/lib/drop"
+import { formatBytes } from "@/lib/format"
+import { MAX_UPLOAD_BYTES } from "@/lib/upload"
 
 type DropzoneProps = {
   busy: boolean
@@ -79,7 +81,7 @@ export function Dropzone({ busy, onPick }: DropzoneProps) {
         <p className="mx-auto max-w-sm text-muted-foreground">
           A zip, a project folder, or loose files with an{" "}
           <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-sm">index.html</code> at
-          the root.
+          the root. A single PDF works too. Up to {formatBytes(MAX_UPLOAD_BYTES)}.
         </p>
       </div>
 

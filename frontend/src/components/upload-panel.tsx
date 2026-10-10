@@ -9,7 +9,7 @@ import { ApiError } from "@/lib/api"
 import { detectUpload, type PickedFile } from "@/lib/drop"
 import { formatBytes, formatFileCount } from "@/lib/format"
 import { usePrefersReducedMotion } from "@/lib/motion"
-import { uploadFiles, uploadZip, type UploadResult } from "@/lib/upload"
+import { checkSize, uploadFiles, uploadZip, type UploadResult } from "@/lib/upload"
 
 export function UploadPanel() {
   const [picked, setPicked] = useState<PickedFile[]>([])
@@ -19,11 +19,26 @@ export function UploadPanel() {
   const reduced = usePrefersReducedMotion()
 
   function onPick(files: PickedFile[]) {
-    setPicked(files)
     setError(null)
+    // Refused here rather than on send: picking a 300 MB folder and then
+    // finding the button does nothing is a worse experience than being told
+    // straight away, and the pick can simply be made again smaller.
+    const tooBig = checkSize(files)
+    if (tooBig !== null) {
+      setPicked([])
+      setError(tooBig)
+      return
+    }
+    setPicked(files)
   }
 
   async function send() {
+    const tooBig = checkSize(picked)
+    if (tooBig !== null) {
+      setError(tooBig)
+      return
+    }
+
     setBusy(true)
     setError(null)
     try {

@@ -280,15 +280,23 @@ func Load() (Config, error) {
 		},
 
 		Upload: Upload{
-			// MaxBytes is the request ceiling and sits above the sum the
+			// MaxBytes is the request ceiling and sits well above the sum the
 			// extract caps allow, so the extract caps are what actually trip
-			// first and report a useful reason.
-			MaxBytes:     envInt64("MAX_UPLOAD_BYTES", 256<<20),
-			ArchiveBytes: envInt64("MAX_ARCHIVE_BYTES", 128<<20),
-			FileBytes:    envInt64("MAX_FILE_BYTES", 32<<20),
-			TotalBytes:   envInt64("MAX_TOTAL_BYTES", 256<<20),
-			MaxEntries:   envInt("MAX_ENTRIES", 4096),
-			TTL:          time.Duration(envInt64("UPLOAD_TTL_SECONDS", 3600)) * time.Second,
+			// first and report a useful reason. It is deliberately loose: a
+			// request that reaches MaxBytes got a bare transport-level refusal
+			// instead of a sentence explaining which limit it broke.
+			MaxBytes: envInt64("MAX_UPLOAD_BYTES", 256<<20),
+
+			// The three below are the real ceiling, all the same 50 MiB.
+			// A single file, an archive, and the total of everything extracted
+			// are bounded separately so each refusal names the thing that was
+			// actually too big rather than a generic limit.
+			ArchiveBytes: envInt64("MAX_ARCHIVE_BYTES", 50<<20),
+			FileBytes:    envInt64("MAX_FILE_BYTES", 50<<20),
+			TotalBytes:   envInt64("MAX_TOTAL_BYTES", 50<<20),
+
+			MaxEntries: envInt("MAX_ENTRIES", 4096),
+			TTL:        time.Duration(envInt64("UPLOAD_TTL_SECONDS", 3600)) * time.Second,
 		},
 	}
 

@@ -235,6 +235,7 @@ func (h *Handler) redeployToSite(c *gin.Context) {
 			Limits:           h.cfg.Upload.Limits(),
 			FlattenRoot:      c.Query("flatten") == "true",
 			RequireIndexHTML: true,
+			AllowSinglePDF:   true,
 		}
 		h.storeUpload(c, to, func(p string) (upload.Result, error) {
 			opts.Prefix = p
@@ -256,6 +257,7 @@ func (h *Handler) redeployToSite(c *gin.Context) {
 		return upload.FromFiles(ctx, h.store, files, upload.Options{
 			Limits:           h.cfg.Upload.Limits(),
 			RequireIndexHTML: true,
+			AllowSinglePDF:   true,
 			Prefix:           p,
 		})
 	})

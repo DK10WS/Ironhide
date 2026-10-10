@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"os"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -426,6 +428,96 @@ func TestRequireIndexHTML(t *testing.T) {
 			// Rejecting after writing would orphan objects no sweeper can find.
 			if fs.count() != 0 {
 				t.Errorf("wrote %v despite rejection", fs.keys())
+			}
+		})
+	}
+}
+
+func TestAllowSinglePDF(t *testing.T) {
+	tests := []struct {
+		name     string
+		archive  []zipEntry
+		allow    bool
+		wantErr  string // "" means must succeed
+		wantRoot string
+	}{
+		{
+			name:     "a lone PDF is accepted",
+			archive:  []zipEntry{{name: "report.pdf", body: "%PDF-1.4"}},
+			allow:    true,
+			wantRoot: "report.pdf",
+		},
+		{
+			name:     "extension case does not matter",
+			archive:  []zipEntry{{name: "REPORT.PDF", body: "%PDF-1.4"}},
+			allow:    true,
+			wantRoot: "REPORT.PDF",
+		},
+		{
+			name:    "still rejected when the option is off",
+			archive: []zipEntry{{name: "report.pdf", body: "%PDF-1.4"}},
+			wantErr: "report.pdf",
+		},
+		{
+			name:    "a folder of PDFs is still rejected",
+			archive: []zipEntry{{name: "a.pdf", body: "x"}, {name: "b.pdf", body: "x"}},
+			allow:   true,
+			wantErr: "a.pdf",
+		},
+		{
+			name:    "a PDF beside another file is still rejected",
+			archive: []zipEntry{{name: "report.pdf", body: "x"}, {name: "notes.txt", body: "x"}},
+			allow:   true,
+			wantErr: "report.pdf",
+		},
+		{
+			name:    "a PDF in a subdirectory is still rejected",
+			archive: []zipEntry{{name: "docs/report.pdf", body: "x"}},
+			allow:   true,
+			wantErr: "report.pdf",
+		},
+		{
+			name:     "an index still wins over the option",
+			archive:  []zipEntry{{name: "index.html", body: "x"}, {name: "report.pdf", body: "x"}},
+			allow:    true,
+			wantRoot: "index.html",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := upload.DefaultOptions()
+			opts.RequireIndexHTML = true
+			opts.AllowSinglePDF = tc.allow
+			fs := &fakeStore{}
+
+			res, err := upload.FromZip(context.Background(), fs,
+				bytes.NewReader(buildZip(t, tc.archive...)), opts)
+
+			if tc.wantErr != "" {
+				if !errors.Is(err, upload.ErrNoIndexHTML) {
+					t.Fatalf("want ErrNoIndexHTML, got %v", err)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("error %q should mention %q", err, tc.wantErr)
+				}
+				// Rejecting after writing would orphan objects no sweeper can find.
+				if fs.count() != 0 {
+					t.Errorf("wrote %v despite rejection", fs.keys())
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("want success, got %v", err)
+			}
+			var roots []string
+			for _, k := range fs.keys() {
+				roots = append(roots, strings.TrimPrefix(k, res.Prefix))
+			}
+			sort.Strings(roots)
+			if !slices.Contains(roots, tc.wantRoot) {
+				t.Errorf("stored %q, want it to include %q", roots, tc.wantRoot)
 			}
 		})
 	}

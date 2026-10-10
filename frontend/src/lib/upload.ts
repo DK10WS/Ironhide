@@ -1,5 +1,34 @@
 import { readResponse } from "./api"
 import type { PickedFile } from "./drop"
+import { formatBytes } from "./format"
+
+/**
+ * The largest upload the server will accept, in bytes.
+ *
+ * This mirrors MAX_TOTAL_BYTES in backend/internal/config/config.go. It is
+ * duplicated rather than fetched because there is no config endpoint, so the
+ * two can drift; the server's own 413 wins either way, and this check only
+ * exists to avoid sending 50 MB only to be refused. Raise one, then the other.
+ */
+export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
+/**
+ * Checks a pick against the limit, before it is sent.
+ *
+ * For a zip the compressed size is all that can be checked without reading the
+ * archive: the server measures what it extracts, so a small archive that
+ * expands past the limit is caught there and not here.
+ *
+ * Returns null when the pick is fine, or a sentence explaining the refusal.
+ */
+export function checkSize(picked: PickedFile[]): string | null {
+  if (picked.length === 0) return null
+
+  const total = picked.reduce((sum, { file }) => sum + file.size, 0)
+  if (total <= MAX_UPLOAD_BYTES) return null
+
+  return `That is ${formatBytes(total)}. The limit is ${formatBytes(MAX_UPLOAD_BYTES)} — try trimming large images or video.`
+}
 
 /** One stored object, as the upload result reports it. */
 export type StoredFile = {
@@ -32,6 +61,19 @@ export type ClaimResult = {
   id: number
   site_url: string
   claimed_at: string
+}
+
+/**
+ * True when the upload is a single PDF, which the server serves as the site
+ * root rather than as a page.
+ *
+ * Kept in step with isLonePDF on the backend, which is what decides this.
+ */
+export function isSinglePDF(result: UploadResult): boolean {
+  if (result.files.length !== 1) return false
+  const file = result.files[0]
+  if (file === undefined) return false
+  return /\.pdf$/i.test(file.key)
 }
 
 /**

@@ -165,7 +165,7 @@ func (h *Handler) resolveKey(urlPath string, dep *database.Deployment) (string, 
 	rel := strings.TrimPrefix(path.Clean("/"+urlPath), "/")
 
 	if rel == "" || rel == "." {
-		rel = h.indexRel(dep)
+		rel = h.rootRel(dep)
 		if rel == "" {
 			return "", false
 		}
@@ -191,6 +191,42 @@ func (h *Handler) frameAncestors() string {
 		return "'none'"
 	}
 	return origin
+}
+
+// rootRel returns the file a request for the site root should serve.
+func (h *Handler) rootRel(dep *database.Deployment) string {
+	if rel := h.indexRel(dep); rel != "" {
+		return rel
+	}
+	return lonePDFRel(dep)
+}
+
+// lonePDFRel returns the deployment's PDF when it consists of exactly one.
+//
+// This mirrors isLonePDF on the upload side, so what was accepted as a document
+// is what the root serves. Any other PDF-less deployment returns "", and the
+// root 404s as it always did.
+func lonePDFRel(dep *database.Deployment) string {
+	var found string
+
+	for _, e := range dep.Manifest {
+		rel := strings.TrimPrefix(e.Key, dep.Prefix+"/")
+		if rel == e.Key {
+			continue // not under this deployment
+		}
+		if strings.Contains(rel, "/") {
+			return ""
+		}
+		if !strings.EqualFold(path.Ext(rel), ".pdf") {
+			return ""
+		}
+		if found != "" {
+			return ""
+		}
+		found = rel
+	}
+
+	return found
 }
 
 // indexRel returns the deployment's index filename relative to its prefix.

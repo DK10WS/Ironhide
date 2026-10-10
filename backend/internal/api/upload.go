@@ -15,6 +15,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -81,6 +82,7 @@ func (h *Handler) uploadZipTo(c *gin.Context, to target) {
 		Limits:           h.cfg.Upload.Limits(),
 		FlattenRoot:      c.Query("flatten") == "true",
 		RequireIndexHTML: true,
+		AllowSinglePDF:   true,
 	}
 
 	h.storeUpload(c, to, func(prefix string) (upload.Result, error) {
@@ -109,6 +111,7 @@ func (h *Handler) uploadFile(c *gin.Context) {
 			parts[0].name, bytes.NewReader(parts[0].data), int64(len(parts[0].data)), upload.Options{
 				Limits:           h.cfg.Upload.Limits(),
 				RequireIndexHTML: true,
+				AllowSinglePDF:   true,
 				Prefix:           prefix,
 			})
 	})
@@ -149,6 +152,7 @@ func (h *Handler) uploadFilesTo(c *gin.Context, to target) {
 		return upload.FromFiles(c.Request.Context(), h.store, files, upload.Options{
 			Limits:           h.cfg.Upload.Limits(),
 			RequireIndexHTML: true,
+			AllowSinglePDF:   true,
 			Prefix:           prefix,
 		})
 	})
@@ -453,6 +457,12 @@ func (h *Handler) fail(c *gin.Context, err error) {
 	code := h.statusFor(err)
 
 	msg := err.Error()
+	if errors.Is(err, upload.ErrTooLarge) {
+		// The underlying errors carry the raw limit, which is the right thing
+		// to log but nonsense to read: "exceeds 52428800 bytes". Say it as a
+		// size instead, keeping whatever named the offending file.
+		msg = humanSize(msg)
+	}
 	if code >= 500 {
 		slog.Error("request failed", "path", c.Request.URL.Path, "err", err)
 		// Do not leak driver detail to an anonymous caller.
@@ -460,6 +470,48 @@ func (h *Handler) fail(c *gin.Context, err error) {
 	}
 
 	c.JSON(code, gin.H{"error": msg})
+}
+
+// humanSize rewrites a trailing "N bytes" limit as a rounded size.
+//
+// The number is scanned backwards off the end rather than matched with a
+// pattern, because everything before it is a file name that may itself contain
+// digits, spaces and quotes.
+func humanSize(msg string) string {
+	const suffix = " bytes"
+	end := strings.LastIndex(msg, suffix)
+	if end < 0 {
+		return msg
+	}
+
+	// Walk back over the digits to find where the limit starts.
+	start := end
+	for start > 0 && msg[start-1] >= '0' && msg[start-1] <= '9' {
+		start--
+	}
+	if start == end {
+		return msg
+	}
+
+	n, err := strconv.ParseInt(msg[start:end], 10, 64)
+	if err != nil {
+		return msg
+	}
+	return msg[:start] + formatSize(n)
+}
+
+// formatSize renders a byte count the way a person would say it.
+func formatSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for size := n / unit; size >= unit && exp < 3; size /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.0f %cB", float64(n)/float64(div), "KMGT"[exp])
 }
 
 // statusFor maps an upload or storage error onto an HTTP status.

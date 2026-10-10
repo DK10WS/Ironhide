@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react"
 import { ExternalLink, RefreshCw, Trash2 } from "lucide-react"
 import { Link, createFileRoute, useLocation } from "@tanstack/react-router"
 import { useAccount } from "@/components/account-provider"
+import { CopyLink } from "@/components/copy-link"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -177,6 +178,7 @@ function SiteRow({ site, busy, onDelete }: { site: Site; busy: boolean; onDelete
               <ExternalLink />
             </a>
           </Button>
+          <CopyLink value={site.url} />
           <Button
             type="button"
             variant="ghost"
