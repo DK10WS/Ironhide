@@ -1,0 +1,60 @@
+name: build
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - backend/**
+      - frontend/**
+      - .github/workflows/build.yaml
+      - "!**/*.md"
+      - "!backend/test/**"
+  pull_request:
+    paths:
+      - backend/**
+      - frontend/**
+      - .github/workflows/build.yaml
+      - "!**/*.md"
+
+jobs:
+  backend:
+      runs-on: ubuntu-slim
+      defaults:
+        run:
+          working-directory: backend
+      steps:
+        - uses: actions/checkout@v7
+  build:
+    if: github.event_name == 'push'
+    strategy:
+      matrix:
+        include:
+          - image: ironhide-backend
+            context: backend
+          - image: ironhide-frontend
+            context: frontend
+    uses: docker/github-builder/.github/workflows/build.yml@v1
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    with:
+      context: ${{ matrix.context }}
+      output: image
+      push: true
+      platforms: linux/amd64,linux/arm64
+      cache: true
+      cache-scope: ${{ matrix.image }}
+      build-args: VERSION=${{ needs.version.outputs.version }}
+      sbom: true
+      set-meta-labels: true
+      set-meta-annotations: true
+      meta-images: ghcr.io/dk10ws/${{ matrix.image }}
+      meta-tags: |
+        type=raw,value=dev
+    secrets:
+      registry-auths: |
+        - registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
