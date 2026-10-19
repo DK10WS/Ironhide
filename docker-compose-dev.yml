@@ -1,0 +1,93 @@
+services:
+  garage:
+    image: dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020
+    command: ["/garage", "server", "--single-node", "--default-bucket"]
+    env_file: .env
+    environment:
+      GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET}
+      GARAGE_ADMIN_TOKEN: ${GARAGE_ADMIN_TOKEN}
+      GARAGE_DEFAULT_ACCESS_KEY: ${GARAGE_DEFAULT_ACCESS_KEY}
+      GARAGE_DEFAULT_SECRET_KEY: ${GARAGE_DEFAULT_SECRET_KEY}
+      GARAGE_DEFAULT_BUCKET: ${GARAGE_DEFAULT_BUCKET}
+    ports:
+      - "3900:3900"
+      - "3902:3902"
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+    healthcheck:
+      test: ["CMD", "/garage", "status"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+
+  backend:
+    build: backend/
+    depends_on:
+      garage:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      GARAGE_ACCESS_KEY: ${GARAGE_DEFAULT_ACCESS_KEY}
+      GARAGE_SECRET_KEY: ${GARAGE_DEFAULT_SECRET_KEY}
+      GARAGE_ENDPOINT: http://garage:3900
+      GARAGE_REGION: garage
+      GARAGE_BUCKET: ${GARAGE_DEFAULT_BUCKET}
+      ADDR: :2345
+      CONTROL_HOST: ${CONTROL_HOST}
+      # Lets the app embed the preview it just uploaded. Without it the data
+      # plane sends frame-ancestors 'none' and the iframe is refused.
+      FRONTEND_ORIGIN: http://localhost:7210
+      PUBLIC_URL: ${PUBLIC_URL}
+      DATA_HOST_SUFFIX: ${DATA_HOST_SUFFIX}
+      DATA_SCHEME: ${DATA_SCHEME}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_SSLMODE: disable
+      # Sign-in. Without these the auth routes are not registered at all.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI}
+      SESSION_COOKIE_SECURE: "false"
+      QUOTA_BYTES_PER_USER: ${QUOTA_BYTES_PER_USER:-1073741824}
+    ports:
+      - "2345:2345"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16
+    container_name: ironhide_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  frontend:
+    build: frontend/
+    depends_on:
+      backend:
+        condition: service_started
+    ports:
+      - "7210:8080"
+
+volumes:
+  garage-meta:
+  garage-data:
+  postgres_data:

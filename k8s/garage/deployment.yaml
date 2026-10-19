@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ironhide-garage
+  labels:
+    app.kubernetes.io/name: ironhide
+    app.kubernetes.io/component: garage
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ironhide
+      app.kubernetes.io/component: garage
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ironhide
+        app.kubernetes.io/component: garage
+    spec:
+      containers:
+        - name: ironhide-garage
+          image: dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020
+          command: ["/garage", "server", "--single-node", "--default-bucket"]
+          ports:
+            - name: s3
+              containerPort: 3900
+          env:
+            - name: GARAGE_RPC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ironhide-garage-secrets
+                  key: GARAGE_RPC_SECRET
+            - name: GARAGE_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ironhide-garage-secrets
+                  key: GARAGE_ADMIN_TOKEN
+            - name: GARAGE_DEFAULT_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ironhide-garage-secrets
+                  key: GARAGE_DEFAULT_ACCESS_KEY
+            - name: GARAGE_DEFAULT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ironhide-garage-secrets
+                  key: GARAGE_DEFAULT_SECRET_KEY
+            - name: GARAGE_DEFAULT_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: ironhide-garage-secrets
+                  key: GARAGE_DEFAULT_BUCKET
+          readinessProbe:
+            exec:
+              command: ["/garage", "status"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: ["/garage", "status"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/garage.toml
+              subPath: garage.toml
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/garage
+      volumes:
+        - name: config
+          configMap:
+            name: ironhide-garage-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: ironhide-garage-data
