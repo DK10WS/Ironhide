@@ -471,9 +471,17 @@ func (d *Database) GetDeploymentByPrefix(ctx context.Context, prefix string) (*D
 	// prefix can carry several rows and only one of them is live. Asking for
 	// the live one first is what stops the retired row being served, which 410s
 	// a site whose replacement is sitting right there holding the manifest.
+	//
+	// The live row is selected for in the where clause rather than by an
+	// ordering. First adds its own order by primary key and discards one given
+	// as an expression, and that left the oldest row, which is the retired
+	// one. The site's up and down switch comes along in the same join, so the
+	// data plane needs one query rather than one per request.
 	err := d.db.WithContext(ctx).
-		Where("prefix = ? AND status = ?", p, StatusLive).
-		Order("id DESC").
+		Select("deployments.*, COALESCE(sites.private, false) AS site_paused").
+		Joins("LEFT JOIN sites ON sites.id = deployments.site_id").
+		Where("deployments.prefix = ? AND deployments.status = ?", p, StatusLive).
+		Order("deployments.id DESC").
 		First(&dep).Error
 
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -482,8 +490,10 @@ func (d *Database) GetDeploymentByPrefix(ctx context.Context, prefix string) (*D
 		// and the serve path can answer with the reason rather than a bare 404
 		// that reads as a mistyped address.
 		err = d.db.WithContext(ctx).
-			Where("prefix = ?", p).
-			Order("id DESC").
+			Select("deployments.*, COALESCE(sites.private, false) AS site_paused").
+			Joins("LEFT JOIN sites ON sites.id = deployments.site_id").
+			Where("deployments.prefix = ?", p).
+			Order("deployments.id DESC").
 			First(&dep).Error
 	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {

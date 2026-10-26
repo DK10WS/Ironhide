@@ -79,7 +79,12 @@ type Site struct {
 
 	OwnerID string `gorm:"size:64;index"`
 
-	Private bool `gorm:"not null;default:false"`
+	// Paused is the site's up and down switch. A paused site is not served to
+	// the public; its objects stay put, so bringing it back is instant.
+	//
+	// The column is called private because it was declared before this feature
+	// and never read or written for any other purpose.
+	Paused bool `gorm:"column:private;not null;default:false"`
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -118,6 +123,11 @@ type Deployment struct {
 	// It is Google's stable subject id rather than a row id, matching
 	// Site.OwnerID, so the same string names the account everywhere.
 	OwnerID string `gorm:"size:64;index"`
+
+	// SitePaused mirrors the owning site's up and down switch, joined in when
+	// a deployment is loaded by prefix. It is not a column of this table: the
+	// arrow marks it read-only, so it is never written.
+	SitePaused bool `gorm:"column:site_paused;->"`
 
 	CreatedAt time.Time
 	UpdatedAt time.Time

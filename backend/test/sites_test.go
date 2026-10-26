@@ -144,6 +144,132 @@ func TestSitesAreScopedToTheirOwner(t *testing.T) {
 	}
 }
 
+// TestTakingASiteDownStopsServingItAndUpBringsItBack is the up and down
+// switch. A site that is down must not be served, must keep its address and
+// its files, and must come back unchanged when it is brought up.
+func TestTakingASiteDownStopsServingItAndUpBringsItBack(t *testing.T) {
+	owner := fmt.Sprintf("pause-%d", time.Now().UnixNano())
+	srv, db, token := signedInServer(t, authConfig(), owner)
+
+	status, body := uploadAs(t, srv, token, "/api/upload/files", "index.html", "<h1>up and down</h1>")
+	if status != http.StatusCreated {
+		t.Fatalf("upload: status %d body %s", status, body)
+	}
+
+	var sites []OwnedSiteForTest
+	listOwned(t, db, owner, &sites)
+	if len(sites) != 1 {
+		t.Fatalf("want 1 site, got %d", len(sites))
+	}
+	id := sites[0].ID
+	slug := sites[0].Slug
+
+	dataHost := slug + authConfig().DataHostSuffix
+	read := func() (int, string) {
+		resp := do(t, srv, http.MethodGet, dataHost, "/", nil)
+		out, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(out)
+	}
+
+	if code, got := read(); code != http.StatusOK {
+		t.Fatalf("before: status %d body %q, want it served", code, got)
+	}
+
+	post := func(path string) (int, string) {
+		req, err := http.NewRequest(http.MethodPost, srv.URL+path, nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Host = controlHost
+		req.AddCookie(&http.Cookie{Name: "ironhide_session", Value: token})
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v", path, err)
+		}
+		out, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp.StatusCode, string(out)
+	}
+
+	if code, got := post(fmt.Sprintf("/api/my/sites/%d/pause", id)); code != http.StatusOK {
+		t.Fatalf("pause: status %d body %s", code, got)
+	}
+
+	code, got := read()
+	if code != http.StatusServiceUnavailable {
+		t.Errorf("while down: status %d body %q, want 503", code, got)
+	}
+	if strings.Contains(got, "up and down") {
+		t.Errorf("while down: the site was still served: %q", got)
+	}
+
+	// The dashboard has to agree, or the button would show the wrong state.
+	listReq := newGet(t, srv, "/api/my/sites", token)
+	listResp, err := srv.Client().Do(listReq)
+	if err != nil {
+		t.Fatalf("list sites: %v", err)
+	}
+	listBody, _ := io.ReadAll(listResp.Body)
+	listResp.Body.Close()
+	if !strings.Contains(string(listBody), `"paused":true`) {
+		t.Errorf("dashboard does not report the site as paused: %s", listBody)
+	}
+
+	if code, got := post(fmt.Sprintf("/api/my/sites/%d/resume", id)); code != http.StatusOK {
+		t.Fatalf("resume: status %d body %s", code, got)
+	}
+
+	code, got = read()
+	if code != http.StatusOK {
+		t.Errorf("after resume: status %d body %q, want it served again", code, got)
+	}
+	if !strings.Contains(got, "up and down") {
+		t.Errorf("after resume: body %q, want the original content", got)
+	}
+}
+
+// TestPausingSomeoneElsesSiteIsRefused checks the switch is scoped to the
+// owner, so one account cannot take another's site down.
+func TestPausingSomeoneElsesSiteIsRefused(t *testing.T) {
+	srv, db, theirs := signedInServer(t, authConfig(), "sub-pause-theirs")
+
+	status, _ := uploadAs(t, srv, theirs, "/api/upload/files", "index.html", "<h1>theirs</h1>")
+	if status != http.StatusCreated {
+		t.Fatalf("upload: status %d", status)
+	}
+
+	var theirsSites []OwnedSiteForTest
+	listOwned(t, db, "sub-pause-theirs", &theirsSites)
+	if len(theirsSites) != 1 {
+		t.Fatalf("want 1 site, got %d", len(theirsSites))
+	}
+
+	_, _, mine := signedInServer(t, authConfig(), "sub-pause-mine")
+	req, err := http.NewRequest(http.MethodPost,
+		fmt.Sprintf("%s/api/my/sites/%d/pause", srv.URL, theirsSites[0].ID), nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Host = controlHost
+	req.AddCookie(&http.Cookie{Name: "ironhide_session", Value: mine})
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("pausing another account's site = %d body %s, want 404", resp.StatusCode, out)
+	}
+
+	// And it must still be up.
+	resp2 := do(t, srv, http.MethodGet, theirsSites[0].Slug+authConfig().DataHostSuffix, "/", nil)
+	out2, _ := io.ReadAll(resp2.Body)
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("the site was taken down by another account: %d %s", resp2.StatusCode, out2)
+	}
+}
+
 // TestDeleteRemovesOnlyYourOwnSite checks the cross-account delete is refused
 // as not found rather than forbidden, so it cannot confirm the id exists.
 func TestDeleteRemovesOnlyYourOwnSite(t *testing.T) {

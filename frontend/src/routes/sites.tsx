@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
-import { ExternalLink, RefreshCw, Trash2, Upload } from "lucide-react"
+import { ExternalLink, Pause, Play, RefreshCw, Trash2, Upload } from "lucide-react"
 import { Link, createFileRoute, useLocation } from "@tanstack/react-router"
 import { useAccount } from "@/components/account-provider"
 import { CopyLink } from "@/components/copy-link"
@@ -8,7 +8,14 @@ import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Spinner } from "@/components/ui/spinner"
-import { deleteSite, getUsage, listSites, type Site, type Usage } from "@/lib/account"
+import {
+  deleteSite,
+  getUsage,
+  listSites,
+  setSitePaused,
+  type Site,
+  type Usage,
+} from "@/lib/account"
 import { formatBytes, formatDateTime } from "@/lib/format"
 
 export const Route = createFileRoute("/sites")({
@@ -64,6 +71,21 @@ function SitesPage() {
       setLoad({
         status: "error",
         message: cause instanceof Error ? cause.message : "That site could not be deleted.",
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function setPaused(id: number, paused: boolean) {
+    setBusy(true)
+    try {
+      await setSitePaused(id, paused)
+      await fetchSites()
+    } catch (cause) {
+      setLoad({
+        status: "error",
+        message: cause instanceof Error ? cause.message : "That site could not be changed.",
       })
     } finally {
       setBusy(false)
@@ -136,6 +158,7 @@ function SitesPage() {
               busy={busy}
               onDelete={() => void remove(site.id)}
               onChanged={() => void fetchSites()}
+              onPause={(paused) => void setPaused(site.id, paused)}
             />
           ))}
         </ul>
@@ -149,11 +172,13 @@ function SiteRow({
   busy,
   onDelete,
   onChanged,
+  onPause,
 }: {
   site: Site
   busy: boolean
   onDelete: () => void
   onChanged: () => void
+  onPause: (paused: boolean) => void
 }) {
   // The hostname without its scheme is what a person would recognise. The slug
   // on its own means nothing outside the database.
@@ -166,7 +191,12 @@ function SiteRow({
         <CardHeader className="gap-2">
           <CardTitle className="truncate font-semibold tracking-[-0.01em]">{host}</CardTitle>
           <CardDescription className="flex flex-wrap items-center gap-x-2">
-            {site.live ? (
+            {site.paused ? (
+              <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+                <span aria-hidden className="size-1.5 rounded-full bg-muted-foreground" />
+                Down
+              </span>
+            ) : site.live ? (
               <span className="inline-flex items-center gap-1.5 text-positive">
                 <span aria-hidden className="size-1.5 rounded-full bg-positive" />
                 Live
@@ -210,6 +240,16 @@ function SiteRow({
                 </a>
               </Button>
               <CopyLink value={site.url} />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={busy}
+                onClick={() => onPause(!site.paused)}
+              >
+                {site.paused ? <Play /> : <Pause />}
+                {site.paused ? "Bring up" : "Take down"}
+              </Button>
               <Button
                 type="button"
                 variant="outline"

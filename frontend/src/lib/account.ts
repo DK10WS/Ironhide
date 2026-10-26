@@ -20,6 +20,8 @@ export type Site = {
   /** RFC 3339, or empty when the site has never been deployed. */
   deployed_at: string
   live: boolean
+  /** True when the owner has taken the site down. */
+  paused: boolean
 }
 
 export type Usage = {
@@ -55,6 +57,17 @@ export async function getUsage(): Promise<Usage> {
 
 export async function deleteSite(id: number): Promise<void> {
   await readResponse(await fetch(`/api/my/sites/${id}`, { method: "DELETE" }))
+}
+
+/**
+ * Takes a site down or brings it back up.
+ *
+ * The site keeps its address and its files either way, so this is not a
+ * delete and not a redeploy.
+ */
+export async function setSitePaused(id: number, paused: boolean): Promise<void> {
+  const path = paused ? "pause" : "resume"
+  await readResponse(await fetch(`/api/my/sites/${id}/${path}`, { method: "POST" }))
 }
 
 /**

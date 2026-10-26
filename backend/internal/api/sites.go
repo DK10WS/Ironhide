@@ -29,6 +29,8 @@ func (h *Handler) registerSites(r *gin.RouterGroup) {
 		my.GET("/sites", h.mySites)
 		my.DELETE("/sites/:id", h.deleteSite)
 		my.POST("/sites/:id/deploy", h.redeployToSite)
+		my.POST("/sites/:id/pause", h.pauseSite)
+		my.POST("/sites/:id/resume", h.resumeSite)
 		my.GET("/usage", h.usage)
 	}
 }
@@ -51,6 +53,7 @@ type siteView struct {
 	Files      int    `json:"files"`
 	DeployedAt string `json:"deployed_at"`
 	Live       bool   `json:"live"`
+	Paused     bool   `json:"paused"`
 }
 
 // mySites lists the signed-in account's sites.
@@ -66,12 +69,13 @@ func (h *Handler) mySites(c *gin.Context) {
 	out := make([]siteView, 0, len(sites))
 	for _, s := range sites {
 		view := siteView{
-			ID:    s.ID,
-			Slug:  s.Slug,
-			URL:   h.previewURL(s.Slug),
-			Bytes: s.Bytes,
-			Files: s.Files,
-			Live:  s.Live,
+			ID:     s.ID,
+			Slug:   s.Slug,
+			URL:    h.previewURL(s.Slug),
+			Bytes:  s.Bytes,
+			Files:  s.Files,
+			Live:   s.Live,
+			Paused: s.Paused,
 		}
 		if s.DeployedAt != nil {
 			view.DeployedAt = s.DeployedAt.UTC().Format(time.RFC3339)
@@ -119,6 +123,33 @@ func (h *Handler) deleteSite(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "deleted", "id": site.ID})
+}
+
+// pauseSite takes a site down. The site keeps its address and its objects, so
+// bringing it back is immediate rather than a redeploy.
+func (h *Handler) pauseSite(c *gin.Context) {
+	h.setPaused(c, true)
+}
+
+// resumeSite brings a site back up.
+func (h *Handler) resumeSite(c *gin.Context) {
+	h.setPaused(c, false)
+}
+
+func (h *Handler) setPaused(c *gin.Context, paused bool) {
+	a := currentAccount(c)
+
+	site, ok := h.ownedSite(c)
+	if !ok {
+		return
+	}
+
+	if err := h.db.SetSitePaused(c.Request.Context(), site.ID, a.User.ID, paused); err != nil {
+		h.fail(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "id": site.ID, "paused": paused})
 }
 
 // checkQuota refuses an upload that would take the account past its allowance.

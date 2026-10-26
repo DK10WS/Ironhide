@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router"
-import { ExternalLink, FileText, KeyRound } from "lucide-react"
+import { ExternalLink, FileText, KeyRound, Link2 } from "lucide-react"
 import { CopyLink } from "@/components/copy-link"
 import { SitePreview } from "@/components/site-preview"
 import { Button } from "@/components/ui/button"
@@ -42,6 +42,11 @@ export function UploadResultCard({ result, onReset }: UploadResultCardProps) {
             </a>
           </Button>
           <CopyLink value={result.preview_url} label="Copy link" className="w-fit" />
+        </div>
+
+        <div className="flex items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2">
+          <Link2 aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+          <span className="min-w-0 flex-1 truncate font-mono text-sm">{result.preview_url}</span>
         </div>
 
         {isPDF ? (

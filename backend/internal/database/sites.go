@@ -23,6 +23,9 @@ type OwnedSite struct {
 
 	// DeployedAt is when it went live, or nil if it never has.
 	DeployedAt *time.Time
+
+	// Paused is the site's up and down switch.
+	Paused bool
 }
 
 // ListOwnedSites returns an account's sites, newest deployment first.
@@ -34,6 +37,7 @@ func (d *Database) ListOwnedSites(ctx context.Context, ownerID string) ([]OwnedS
 	err := d.db.WithContext(ctx).
 		Model(&Site{}).
 		Select(`sites.*,
+			sites.private AS paused,
 			EXISTS (SELECT 1 FROM deployments d
 			        WHERE d.site_id = sites.id AND d.status = ?) AS live,
 			COALESCE((SELECT d2.bytes FROM deployments d2
@@ -74,6 +78,44 @@ func (d *Database) GetOwnedSite(ctx context.Context, id uint, ownerID string) (*
 		return nil, fmt.Errorf("get owned site: %w", err)
 	}
 	return &site, nil
+}
+
+// SetSitePaused takes a site down or brings it back up.
+//
+// The owner filter is in the update rather than applied afterwards, so a site
+// belonging to someone else cannot be reached by naming its id. A site that is
+// already in the requested state is not an error: the caller wanted it down,
+// and it is down.
+func (d *Database) SetSitePaused(ctx context.Context, id uint, ownerID string, paused bool) error {
+	if ownerID == "" {
+		return ErrNotFound
+	}
+
+	res := d.db.WithContext(ctx).
+		Model(&Site{}).
+		Where("id = ? AND owner_id = ?", id, ownerID).
+		Update("private", paused)
+	if res.Error != nil {
+		return fmt.Errorf("set site paused: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		// Either no such site, or it is already in the state asked for, in
+		// which case there was nothing to change. The first is a refusal and
+		// the second is a success, and they cannot be told apart from the
+		// affected count, so the site's existence is checked separately.
+		var site Site
+		err := d.db.WithContext(ctx).
+			Select("id").
+			Where("id = ? AND owner_id = ?", id, ownerID).
+			First(&site).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("check site: %w", err)
+		}
+	}
+	return nil
 }
 
 // ReleaseSite detaches every deployment from a site and removes the site row.

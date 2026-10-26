@@ -146,12 +146,19 @@ func (h *Handler) lookup(c *gin.Context, slug string) (*database.Deployment, err
 		// Expired but not yet swept. Serving it would defeat the claim window,
 		// so the sweeper's absence must not leak content.
 		return nil, errGone
+	case dep.SitePaused:
+		// The owner took the site down. It is not expired and not missing, so
+		// it gets its own answer rather than being folded into either.
+		return nil, errPaused
 	}
 
 	return dep, nil
 }
 
 var errGone = errors.New("deployment is no longer available")
+
+// errPaused is a site the owner has taken down.
+var errPaused = errors.New("site is down")
 
 // resolveKey turns a request path into an object key inside the deployment.
 //
@@ -295,6 +302,9 @@ func (h *Handler) serveStatus(c *gin.Context, err error) {
 	case errors.Is(err, errGone):
 		c.Header("Cache-Control", "no-store")
 		c.String(http.StatusGone, "This deployment has expired.")
+	case errors.Is(err, errPaused):
+		c.Header("Cache-Control", "no-store")
+		c.String(http.StatusServiceUnavailable, "This site is down.")
 	default:
 		slog.Error("serve lookup failed", "err", err)
 		c.String(http.StatusBadGateway, "Storage unavailable.")
