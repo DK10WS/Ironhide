@@ -1,13 +1,11 @@
 // Package api is the HTTP transport.
 //
-// Handlers translate a request into calls on the upload and database packages
-// and translate the result back. There is no business logic here: anything
-// worth testing belongs in those packages.
+// Handlers translate a request into a call on package core and translate the
+// result back. There is no business logic here: anything worth testing belongs
+// in core, so the MCP transport can share it.
 package api
 
 import (
-	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -21,16 +19,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/dk10ws/ironhide/internal/database"
+	"github.com/dk10ws/ironhide/internal/core"
 	"github.com/dk10ws/ironhide/internal/safepath"
 	"github.com/dk10ws/ironhide/internal/upload"
 )
-
-// zipMagic is the local file header every zip archive starts with.
-//
-// Detection is by content, never by filename or the client's Content-Type,
-// because both are attacker-controlled: a caller can name a bomb "index.html".
-var zipMagic = []byte{'P', 'K', 0x03, 0x04}
 
 // maxParts bounds how many multipart parts one request may declare, so a
 // request cannot make the runtime build a huge slice of headers before the
@@ -38,10 +30,10 @@ var zipMagic = []byte{'P', 'K', 0x03, 0x04}
 const maxParts = 8192
 
 func (h *Handler) uploadZip(c *gin.Context) {
-	h.uploadZipTo(c, target{})
+	h.uploadZipTo(c, core.Target{})
 }
 
-func (h *Handler) uploadZipTo(c *gin.Context, to target) {
+func (h *Handler) uploadZipTo(c *gin.Context, to core.Target) {
 	parts, err := readParts(c, h.cfg.Upload.MaxBytes)
 	if err != nil {
 		h.fail(c, err)
@@ -60,37 +52,22 @@ func (h *Handler) uploadZipTo(c *gin.Context, to target) {
 		return
 	}
 
-	raw := parts[0].data
-	if len(raw) > int(h.cfg.Upload.ArchiveBytes) {
-		h.fail(c, fmt.Errorf("%w: archive exceeds %d bytes", upload.ErrTooLarge, h.cfg.Upload.ArchiveBytes))
-		return
-	}
-
-	if !bytes.HasPrefix(raw, zipMagic) {
-		h.fail(c, fmt.Errorf("%w: body does not start with a zip header", upload.ErrInvalidArchive))
-		return
-	}
-
-	// Checked before anything is stored. The archive is compressed, so this
-	// bounds the request rather than the result; the real total is re-checked
-	// against the quota once the manifest is known, before the row goes live.
-	if to.owned() && !h.withinQuota(c, to, int64(len(raw))) {
-		return
-	}
-
-	opts := upload.Options{
-		Limits:           h.cfg.Upload.Limits(),
-		FlattenRoot:      c.Query("flatten") == "true",
-		RequireIndexHTML: true,
-		AllowSinglePDF:   true,
-	}
-
-	h.storeUpload(c, to, func(prefix string) (upload.Result, error) {
-		opts.Prefix = prefix
-		return upload.FromZip(c.Request.Context(), h.store, bytes.NewReader(raw), opts)
+	res, err := h.core.Upload(c.Request.Context(), to, core.Payload{
+		Zip:     parts[0].data,
+		Flatten: c.Query("flatten") == "true",
 	})
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+
+	c.JSON(http.StatusCreated, uploadBody(res))
 }
 
+// uploadFile stores a single file.
+//
+// It stays anonymous regardless of the caller's session: this is the route a
+// script posts one page to, and it has never created an owned site.
 func (h *Handler) uploadFile(c *gin.Context) {
 	parts, err := readParts(c, h.cfg.Upload.MaxBytes)
 	if err != nil {
@@ -102,26 +79,26 @@ func (h *Handler) uploadFile(c *gin.Context) {
 		return
 	}
 
-	if !h.withinQuota(c, target{}, int64(len(parts[0].data))) {
+	res, err := h.core.Upload(c.Request.Context(), core.Target{}, core.Payload{
+		Files: []upload.IncomingFile{{
+			Name: parts[0].name,
+			Data: parts[0].data,
+			Size: int64(len(parts[0].data)),
+		}},
+	})
+	if err != nil {
+		h.fail(c, err)
 		return
 	}
 
-	h.storeUpload(c, target{}, func(prefix string) (upload.Result, error) {
-		return upload.FromSingleFile(c.Request.Context(), h.store,
-			parts[0].name, bytes.NewReader(parts[0].data), int64(len(parts[0].data)), upload.Options{
-				Limits:           h.cfg.Upload.Limits(),
-				RequireIndexHTML: true,
-				AllowSinglePDF:   true,
-				Prefix:           prefix,
-			})
-	})
+	c.JSON(http.StatusCreated, uploadBody(res))
 }
 
 func (h *Handler) uploadFiles(c *gin.Context) {
-	h.uploadFilesTo(c, target{})
+	h.uploadFilesTo(c, core.Target{})
 }
 
-func (h *Handler) uploadFilesTo(c *gin.Context, to target) {
+func (h *Handler) uploadFilesTo(c *gin.Context, to core.Target) {
 	parts, err := readParts(c, h.cfg.Upload.MaxBytes)
 	if err != nil {
 		h.fail(c, err)
@@ -132,30 +109,59 @@ func (h *Handler) uploadFilesTo(c *gin.Context, to target) {
 		return
 	}
 
+	res, err := h.core.Upload(c.Request.Context(), to, core.Payload{
+		Files: incomingFiles(parts),
+	})
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+
+	c.JSON(http.StatusCreated, uploadBody(res))
+}
+
+// incomingFiles converts parsed parts into the form core and upload take.
+func incomingFiles(parts []part) []upload.IncomingFile {
 	files := make([]upload.IncomingFile, 0, len(parts))
-	var total int64
 	for _, p := range parts {
 		files = append(files, upload.IncomingFile{
 			Name: p.name,
 			Data: p.data,
 			Size: int64(len(p.data)),
 		})
-		total += int64(len(p.data))
+	}
+	return files
+}
+
+// uploadBody renders an upload result as the JSON clients already expect.
+func uploadBody(res core.Result) gin.H {
+	body := gin.H{
+		"id":          res.ID,
+		"preview_url": res.PreviewURL,
+		"expires_at":  expiresAt(res.ExpiresAt),
+		"bytes":       res.Bytes,
+		"files":       res.Files,
 	}
 
-	// Uncompressed, so this is the figure the quota is actually measured in.
-	if to.owned() && !h.withinQuota(c, to, total) {
-		return
+	if res.Owned {
+		// No claim link: the site is already permanent and owned, so there is
+		// nothing to redeem and no credential worth putting in a response.
+		body["owned"] = true
+	} else {
+		body["claim_url"] = res.ClaimURL
 	}
 
-	h.storeUpload(c, to, func(prefix string) (upload.Result, error) {
-		return upload.FromFiles(c.Request.Context(), h.store, files, upload.Options{
-			Limits:           h.cfg.Upload.Limits(),
-			RequireIndexHTML: true,
-			AllowSinglePDF:   true,
-			Prefix:           prefix,
-		})
-	})
+	return body
+}
+
+// expiresAt renders the claim deadline, or null when the deployment is
+// permanent. A permanent drop has no deadline to report, and emitting the zero
+// time would be a lie.
+func expiresAt(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 // part is one file part, already read into memory under the request cap.
@@ -253,205 +259,6 @@ func parseErr(err error) error {
 	return fmt.Errorf("%w: malformed multipart body: %v", upload.ErrInvalidArchive, err)
 }
 
-// storeUpload runs the three-step write for every upload shape.
-//
-// The order is the point:
-//
-//  1. create a deployment row, still pending, carrying the object prefix
-//  2. write the objects under that prefix
-//  3. promote the row to live
-//
-// Because the row is written first, bytes can never exist without a row
-// describing them. The failure mode is the reverse — a pending row with no or
-// partial objects — and that direction is the cheap one to clean up, because
-// Postgres can find it with an indexed query while orphaned objects would
-// require listing every key in the bucket.
-// target says who an upload is for. The zero value is the pre-existing
-// behaviour: an anonymous temporary drop that expires and is kept alive by a
-// claim link.
-type target struct {
-	// ownerID is Google's subject id. Empty means anonymous.
-	ownerID string
-
-	// siteID is the site being deployed to. Zero means this upload creates a
-	// new site rather than replacing one.
-	siteID uint
-
-	// prefix reuses an existing prefix on a redeploy, which is what keeps the
-	// address stable. Empty means mint a fresh one.
-	prefix string
-}
-
-// owned reports whether this upload belongs to an account.
-func (t target) owned() bool { return t.ownerID != "" }
-
-// storeUpload runs the three-step write for every upload shape.
-//
-// The order is the point:
-//
-//  1. create a deployment row, still pending, carrying the object prefix
-//  2. write the objects under that prefix
-//  3. promote the row to live
-//
-// Because the row is written first, bytes can never exist without a row
-// describing them. The failure mode is the reverse — a pending row with no or
-// partial objects — and that direction is the cheap one to clean up, because
-// Postgres can find it with an indexed query while orphaned objects would
-// require listing every key in the bucket.
-func (h *Handler) storeUpload(c *gin.Context, to target, store func(prefix string) (upload.Result, error)) {
-	ctx := c.Request.Context()
-
-	// A redeploy writes over the site's existing prefix so its address does
-	// not change. Otherwise a fresh one is minted here rather than inside
-	// upload so the row can carry it. It is still server-generated: nothing
-	// about it comes from the request, which is what keeps one upload from
-	// addressing another.
-	prefix := to.prefix
-	if prefix == "" {
-		prefix = upload.NewPrefix()
-	}
-
-	input := database.CreateDeploymentInput{Prefix: prefix}
-
-	if to.owned() {
-		// An owned deployment is not a drop: it has no claim window, because
-		// there is nothing to claim and nothing to expire.
-		//
-		// ClaimedBy is deliberately left empty here. Setting it would make
-		// CreateDeployment write the row live immediately, and RecordUpload
-		// below exists to promote a pending row once the objects are really
-		// there. The ownership is recorded by attachOwned, after the write.
-		input.OwnerID = to.ownerID
-		input.TTL = 0
-	} else {
-		input.TTL = h.cfg.Upload.TTL
-	}
-
-	created, err := h.db.CreateDeployment(ctx, input)
-	if err != nil {
-		h.fail(c, err)
-		return
-	}
-
-	// No files are known yet, so the row starts empty and MarkLive fills in
-	// the real counts from the upload result.
-	res, err := store(prefix)
-	if err != nil {
-		h.abandonUpload(c, created.Deployment.ID, res, err)
-		return
-	}
-
-	if err := h.db.RecordUpload(ctx, created.Deployment.ID, res); err != nil {
-		// The objects are stored but the manifest could not be written, so
-		// the row cannot describe them. Fail it rather than serving a site
-		// whose recorded contents disagree with the bucket.
-		h.abandonUpload(c, created.Deployment.ID, res, err)
-		return
-	}
-
-	slug := created.Deployment.Slug()
-
-	if to.owned() {
-		if err := h.attachOwned(ctx, to, created.Deployment.ID, slug, res); err != nil {
-			// The objects exist but nothing ties them to the account, so the
-			// row has to go rather than leave bytes nobody can find.
-			h.abandonUpload(c, created.Deployment.ID, res, err)
-			return
-		}
-	}
-
-	slog.Info("upload accepted",
-		"id", created.Deployment.ID,
-		"prefix", created.Deployment.Prefix,
-		"files", len(res.Files),
-		"bytes", res.Bytes,
-		"owned", to.owned(),
-	)
-
-	body := gin.H{
-		"id":          created.Deployment.ID,
-		"preview_url": h.previewURL(slug),
-		"expires_at":  expiresAt(created.Deployment),
-		"bytes":       res.Bytes,
-		"files":       res.Files,
-	}
-
-	if to.owned() {
-		// No claim link: the site is already permanent and owned, so there is
-		// nothing to redeem and no credential worth putting in a response.
-		body["owned"] = true
-	} else {
-		body["claim_url"] = h.claimURL(created.ClaimToken)
-	}
-
-	c.JSON(http.StatusCreated, body)
-}
-
-// attachOwned ties a finished upload to a site in the owner's account.
-//
-// A new site takes its name from the deployment's slug, which is the label the
-// address is built from. A redeploy keeps the existing row so the address is
-// unchanged, and retires the deployment it supersedes so the old bytes stop
-// counting against the quota in the same transaction.
-func (h *Handler) attachOwned(ctx context.Context, to target, deploymentID uint, slug string, res upload.Result) error {
-	if to.siteID != 0 {
-		if err := h.db.AttachSiteToDeployment(ctx, deploymentID, to.siteID, to.ownerID); err != nil {
-			return err
-		}
-		// A redeploy wrote over the old prefix, so anything the new manifest no
-		// longer lists is now unreachable and still counted against the quota.
-		return h.deleteStaleKeys(ctx, to.siteID, res.Files)
-	}
-
-	site, err := h.db.UpsertSite(ctx, slug, strings.TrimPrefix(h.previewURL(slug), h.cfg.DataScheme+"://"), to.ownerID)
-	if err != nil {
-		return err
-	}
-	return h.db.AttachSiteToDeployment(ctx, deploymentID, site.ID, to.ownerID)
-}
-
-// abandonUpload deals with the row for an upload that did not finish.
-//
-// If nothing was written the row is deleted outright, because a row exists to
-// describe objects and there are none. Keeping a failed row per rejected
-// request would let an unauthenticated caller fill the deployments table for
-// free, and almost every rejection is a validation failure that never touched
-// the bucket.
-//
-// If objects did land, the row is marked failed instead: the reconciler will
-// report the prefix so whatever was written can be found, and nothing is lost.
-func (h *Handler) abandonUpload(c *gin.Context, id uint, res upload.Result, cause error) {
-	ctx := c.Request.Context()
-
-	var cleanupErr error
-	if len(res.Files) == 0 {
-		cleanupErr = h.db.DeleteDeployment(ctx, id)
-	} else {
-		cleanupErr = h.db.MarkFailed(ctx, id)
-	}
-	if cleanupErr != nil {
-		slog.Error("could not clean up a failed upload",
-			"id", id, "prefix", res.Prefix, "err", cleanupErr)
-	}
-
-	h.fail(c, cause)
-}
-
-// expiresAt renders the claim deadline, or null when the deployment is
-// permanent. A permanent drop has no deadline to report, and emitting the zero
-// time would be a lie.
-func expiresAt(d *database.Deployment) any {
-	if d.ExpiresAt == nil {
-		return nil
-	}
-	return d.ExpiresAt.Format(time.RFC3339)
-}
-
-// claimURL builds the single-use claim link for a drop.
-func (h *Handler) claimURL(token string) string {
-	return h.cfg.PublicURL + "/claim/" + token
-}
-
 // fail maps an error onto a status code and a message safe to return.
 func (h *Handler) fail(c *gin.Context, err error) {
 	code := h.statusFor(err)
@@ -517,6 +324,8 @@ func formatSize(n int64) string {
 // statusFor maps an upload or storage error onto an HTTP status.
 func (h *Handler) statusFor(err error) int {
 	switch {
+	case errors.Is(err, core.ErrQuota):
+		return http.StatusRequestEntityTooLarge
 	case errors.Is(err, upload.ErrTooLarge):
 		return http.StatusRequestEntityTooLarge
 	case errors.Is(err, upload.ErrTooManyEntries):

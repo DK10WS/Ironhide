@@ -2,17 +2,16 @@ package api
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/dk10ws/ironhide/internal/core"
 	"github.com/dk10ws/ironhide/internal/database"
 )
 
@@ -29,7 +28,7 @@ func (h *Handler) serve(c *gin.Context) {
 		return
 	}
 
-	dep, err := h.lookup(c, slug)
+	dep, err := h.core.Lookup(c.Request.Context(), slug)
 	if err != nil {
 		h.serveStatus(c, err)
 		return
@@ -41,7 +40,7 @@ func (h *Handler) serve(c *gin.Context) {
 		return
 	}
 
-	body, size, err := h.store.GetObject(c.Request.Context(), key)
+	body, size, err := h.core.GetObject(c.Request.Context(), key)
 	if err != nil {
 		h.notFound(c)
 		return
@@ -87,9 +86,10 @@ func (h *Handler) slugFromHost(host string) (string, bool) {
 // "abc.preview.example.com" and be served. Refusing a host whose tail is not
 // numeric keeps the suffix anchored to the end of the whole name.
 //
-// The config may pin a port, which is how the URL previewURL builds reaches this
-// listener. That port is part of the URL and not part of the name, so it comes
-// off the suffix here; a Host that omits it still names the same deployment.
+// The config may pin a port, which is how the URL built for a preview reaches
+// this listener. That port is part of the URL and not part of the name, so it
+// comes off the suffix here; a Host that omits it still names the same
+// deployment.
 func hostName(host string) (string, bool) {
 	name, port, found := strings.Cut(host, ":")
 	if !found {
@@ -128,37 +128,6 @@ func validSlug(s string) bool {
 	}
 	return true
 }
-
-// lookup resolves a slug to a live deployment.
-func (h *Handler) lookup(c *gin.Context, slug string) (*database.Deployment, error) {
-	dep, err := h.db.GetDeploymentByPrefix(c.Request.Context(), "uploads/"+slug)
-	if err != nil {
-		if errors.Is(err, database.ErrNotFound) {
-			return nil, database.ErrNotFound
-		}
-		return nil, err
-	}
-
-	switch {
-	case dep.Status != database.StatusLive:
-		return nil, errGone
-	case dep.Expired(time.Now()):
-		// Expired but not yet swept. Serving it would defeat the claim window,
-		// so the sweeper's absence must not leak content.
-		return nil, errGone
-	case dep.SitePaused:
-		// The owner took the site down. It is not expired and not missing, so
-		// it gets its own answer rather than being folded into either.
-		return nil, errPaused
-	}
-
-	return dep, nil
-}
-
-var errGone = errors.New("deployment is no longer available")
-
-// errPaused is a site the owner has taken down.
-var errPaused = errors.New("site is down")
 
 // resolveKey turns a request path into an object key inside the deployment.
 //
@@ -299,10 +268,10 @@ func (h *Handler) serveStatus(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, database.ErrNotFound):
 		h.notFound(c)
-	case errors.Is(err, errGone):
+	case errors.Is(err, core.ErrGone):
 		c.Header("Cache-Control", "no-store")
 		c.String(http.StatusGone, "This deployment has expired.")
-	case errors.Is(err, errPaused):
+	case errors.Is(err, core.ErrPaused):
 		c.Header("Cache-Control", "no-store")
 		c.String(http.StatusServiceUnavailable, "This site is down.")
 	default:
@@ -316,9 +285,4 @@ func (h *Handler) serveStatus(c *gin.Context, err error) {
 func (h *Handler) notFound(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	c.Data(http.StatusNotFound, "text/plain; charset=utf-8", []byte("404 Not Found\n"))
-}
-
-// previewURL builds the absolute preview address for a deployment.
-func (h *Handler) previewURL(slug string) string {
-	return fmt.Sprintf("%s://%s%s/", h.cfg.DataScheme, slug, h.cfg.DataHostSuffix)
 }

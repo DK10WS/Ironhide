@@ -14,8 +14,6 @@ package api
 import (
 	"context"
 	"errors"
-	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -24,34 +22,23 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/dk10ws/ironhide/internal/config"
+	"github.com/dk10ws/ironhide/internal/core"
 	"github.com/dk10ws/ironhide/internal/database"
-	"github.com/dk10ws/ironhide/internal/upload"
 )
 
-// objectStore is the storage surface this package needs: writes for the upload
-// routes, reads for the data plane.
-//
-// Declared here rather than importing package garage, so the transport depends
-// on behaviour and not on the S3 client behind it.
-type objectStore interface {
-	upload.ObjectStore
-	GetObject(ctx context.Context, key string) (io.ReadCloser, int64, error)
-
-	// DeleteKey removes a single object. A redeploy uses it to clear files the
-	// new manifest dropped, which would otherwise stay in the bucket and keep
-	// counting against the owner's quota.
-	DeleteKey(ctx context.Context, key string) error
-}
-
 // Handler holds the dependencies shared by every route.
+//
+// The database is here for sign-in only: sessions are a credential concern and
+// live in the transport that issues the cookie. Everything that acts on
+// deployments goes through core.
 type Handler struct {
-	store objectStore
-	db    *database.Database
-	cfg   config.Config
+	core *core.Core
+	db   *database.Database
+	cfg  config.Config
 }
 
-func NewRouter(cfg config.Config, store objectStore, db *database.Database) *gin.Engine {
-	h := &Handler{store: store, db: db, cfg: cfg}
+func NewRouter(cfg config.Config, store core.Store, db *database.Database) *gin.Engine {
+	h := &Handler{core: core.New(store, db, cfg), db: db, cfg: cfg}
 
 	gin.SetMode(gin.ReleaseMode)
 
@@ -129,7 +116,7 @@ func (h *Handler) ready(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
 
-	if err := h.db.Ping(ctx); err != nil {
+	if err := h.core.Ping(ctx); err != nil {
 		slog.Warn("readiness failed", "err", err)
 		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable"})
 		return
@@ -148,13 +135,7 @@ func (h *Handler) ready(c *gin.Context) {
 // Nothing about the token is logged. It is the only credential on this path,
 // and stderr is shipped onward to a collector.
 func (h *Handler) claim(c *gin.Context) {
-	token := c.Param("token")
-	if token == "" {
-		h.fail(c, fmt.Errorf("%w: missing claim token", database.ErrNotFound))
-		return
-	}
-
-	dep, err := h.db.ClaimPermanently(c.Request.Context(), token, claimedByToken)
+	claimed, err := h.core.Claim(c.Request.Context(), c.Param("token"))
 	if err != nil {
 		switch {
 		case errors.Is(err, database.ErrAlreadyClaimed):
@@ -172,20 +153,14 @@ func (h *Handler) claim(c *gin.Context) {
 		return
 	}
 
-	slog.Info("deployment claimed", "id", dep.ID, "prefix", dep.Prefix)
-
 	c.JSON(http.StatusOK, gin.H{
-		"id":         dep.ID,
-		"site_url":   h.previewURL(dep.Slug()),
-		"claimed_at": dep.ClaimedAt.UTC().Format(time.RFC3339),
+		"id":         claimed.ID,
+		"site_url":   claimed.URL,
+		"claimed_at": claimed.ClaimedAt.UTC().Format(time.RFC3339),
 	})
 }
 
-// claimedByToken records who claimed a deployment when the token is the only
-// credential available. It is a fixed string rather than the token itself, so
-// no secret reaches the database or the logs.
-const claimedByToken = "claim-token"
-
+// requestLogger records one line per request.
 func requestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
